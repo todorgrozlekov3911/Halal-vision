@@ -71,6 +71,10 @@ class UltralyticsDetector(Detector):
         self.device = str(det.device)
         self.half = bool(det.get("half", False))
         self.int8 = bool(det.get("int8", False))
+        if self.int8 and self.device.startswith("intel:npu"):
+            # Measured: the INT8 export on the NPU found nobody in the far-away test section and
+            # lowered close-up scores; missed people would be shown uncensored. FP is exact there.
+            raise ValueError("detector.int8 with intel:npu loses detections; use int8: false on the NPU")
         self.model = YOLO(str(_weights_for(det.model, self.device, self.imgsz, self.int8)), task="segment")
 
         tracker_cfg = yaml.safe_load((TRACKERS_DIR / f"{det.tracker}.yaml").read_text())
