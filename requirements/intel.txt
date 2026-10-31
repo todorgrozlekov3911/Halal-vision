@@ -3,7 +3,12 @@
 # (https://download.pytorch.org/whl/cpu); installing this file with plain
 # `pip install -r` will fail without it.
 
-torch==2.5.1+cpu
-torchvision==0.20.1+cpu
-openvino==2024.6.0
-onnxruntime-openvino==1.20.0
+# Same environment-marker scheme as nvidia.txt: Python <= 3.12 keeps the
+# older known-good pins, 3.13+ gets the versions with 3.13 wheels.
+
+torch==2.15.0+cpu; python_version >= "3.13"
+torch==2.5.1+cpu; python_version < "3.13"
+torchvision==0.29.2+cpu; python_version >= "3.13"
+torchvision==0.20.1+cpu; python_version < "3.13"
+openvino==2026.4.1
+onnxruntime-openvino==1.24.1

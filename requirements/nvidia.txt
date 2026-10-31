@@ -1,10 +1,16 @@
 # NVIDIA laptop (RTX 2050) — CUDA stack.
 # Default PyPI torch wheels on Linux bundle CUDA; no system CUDA toolkit needed.
 
-torch==2.5.1
-torchvision==0.20.1
-onnxruntime-gpu==1.20.1
+# The "; python_version ..." suffixes are pip environment markers: each line
+# installs only where its condition holds, so Python <= 3.12 keeps the older
+# known-good pins while 3.13+ gets the versions that ship 3.13 wheels.
+
+torch==2.15.0; python_version >= "3.13"
+torch==2.5.1; python_version < "3.13"
+torchvision==0.29.2; python_version >= "3.13"
+torchvision==0.20.1; python_version < "3.13"
+onnxruntime-gpu==1.31.1
 
 # TensorRT for the FP16 benchmark (T14). Large download; comment out if
 # disk space is tight — ultralytics can also install it on demand at export.
-tensorrt==10.7.0
+tensorrt==10.16.1.11
