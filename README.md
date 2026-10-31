@@ -141,23 +141,26 @@ while True:
 - **No separate watchdog.** If processing hangs, the display keeps the last censored image (safe). If it throws an error, the `try/except` shows the last safe frame. Optional for the product later: fade to black with a warning if the shown image is older than about 500 ms.
 - **The source is irrelevant after the grabber.** Everything downstream sees only `Frame`.
 
-### Suggested repository layout
+### Repository layout
 ```
-halal_vision/
-  io/          sources.py, grabber.py, sinks.py          (A)
-  detect/      detector.py, masks.py                     (A)
-  render/      renderer.py, eyes.py, niqab.py            (A)
-  identity/    module.py, face.py, gender.py,
-               whitelist.py, policy.py                   (B)
-  app/         main.py, enroll_ui.py                     (A / B)
-  eval/        dump_crops.py, label_tracks.py, evaluate.py (B)
-  contracts.py                                           (shared, agreed at hour 0)
-configs/       config.nvidia.yaml, config.intel.yaml
-trackers/      custom_bytetrack.yaml, custom_botsort.yaml
-requirements-common.txt, requirements-nvidia.txt, requirements-intel.txt
-whitelist/     ← gitignored (family photos)
-clips/, crops/ ← gitignored (test footage)
+core/                      the one Python package; run with `python -m core.app --machine intel`
+  app.py                   entry point (main loop lands here in T09)
+  config_table.py          config loader (T03)
+  contracts.py             shared types and interfaces (T02)
+  video/                   sources.py, grabber.py, sinks.py                  (A)
+  detect/                  detector.py, masks.py                             (A)
+  render/                  renderer.py, eyes.py, niqab.py                    (A)
+  identity/                module.py, face.py, gender.py, whitelist.py,
+                           policy.py                                         (B)
+system-configurations/     shared.yaml, intel.yaml, nvidia.yaml (+ trackers/ when tuned)
+requirements/              base.txt, intel.txt, nvidia.txt, lock-<machine>.txt
+setup.sh                   creates .venv for this machine
+whitelist/                 ← gitignored (family photos)
+clips/, crops/             ← gitignored (test footage)
 ```
+Add folders (e.g. `core/eval/`, `tests/`) when the first task needs them. The video
+package is `video/`, not `io/`: a folder named `io` shadows Python's own `io` module
+whenever a script is run from inside `core/`.
 **Never commit family photos, face fingerprints or test footage of real people.**
 
 ---
