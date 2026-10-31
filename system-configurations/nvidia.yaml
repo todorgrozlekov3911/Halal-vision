@@ -1,7 +1,7 @@
 # NVIDIA laptop (RTX 2050). Values here override shared.yaml.
 
 machine: nvidia
-expected_fps: 30            # gate M1 target; used to convert track_buffer_s to frames
+expected_fps: 30            # gate M1 target; used to convert track_buffer_seconds to frames
 
 detector:
   device: cuda:0
