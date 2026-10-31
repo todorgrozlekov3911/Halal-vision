@@ -84,7 +84,8 @@ class FileSink(Sink):
                "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", f"{width}x{height}", "-r", str(Fraction(self.fps).limit_denominator(1001)),
                "-i", "-"]
         if self.audio_from:
-            cmd += ["-i", str(self.audio_from), "-map", "0:v", "-map", "1:a?", "-c:a", "copy"]
+            
+            cmd += ["-i", str(self.audio_from), "-map", "0:v", "-map", "1:a?", "-c:a", "copy", "-shortest"]
         cmd += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p", str(self.path)]
         self._proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=self._log)
         self._shape = (height, width)
@@ -129,9 +130,14 @@ class FileSink(Sink):
     def close(self) -> None:
         if self._proc is None:
             return
-        if self._thread.is_alive():
-            self._queue.put(None)  # writer is alive, so it will make room
-            self._thread.join()
+        while self._thread.is_alive():
+            try:
+                self._queue.put(None, timeout=0.5)  # sentinel: writer exits after the backlog
+                break
+            except queue.Full:
+                pass  # full queue + alive writer: it will make room; if it died, the
+                      # loop re-checks is_alive instead of waiting on a corpse forever
+        self._thread.join()
         try:
             self._proc.stdin.close()
         except BrokenPipeError:
