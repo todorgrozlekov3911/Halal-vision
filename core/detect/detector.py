@@ -11,22 +11,28 @@ Per frame:
                        score >= detector.conf comes back with track_id=None and is
                        concealed downstream (rule 4, fail closed)
 
-Masks stay at the model's resolution, letterbox padding included; MaskGeometry
-says how they map onto the frame (resizing is the mask pipeline's job, T10).
+Masks stay at the model's prototype resolution (1/4 of the model input, e.g.
+96x160 for 384x640), letterbox padding included; MaskGeometry says how they map
+onto the frame. Ultralytics would enlarge every person's mask to the full model
+input on the CPU; we skip that, because the mask pipeline (T10) merges the
+concealed people at low resolution and enlarges once, straight to the frame.
 
 No other module imports Ultralytics: everything leaves here as contracts types.
 """
 from __future__ import annotations
 
 import shutil
+import time
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import yaml
 from ultralytics import YOLO
+from ultralytics.engine.results import Results
+from ultralytics.models.yolo.segment import SegmentationPredictor
 from ultralytics.trackers.track import TRACKER_MAP
-from ultralytics.utils import IterableSimpleNamespace
+from ultralytics.utils import IterableSimpleNamespace, ops
 
 from core.contracts import Detections, Detector, Frame, MaskGeometry, Track
 
@@ -34,6 +40,24 @@ REPO = Path(__file__).resolve().parents[2]
 MODELS_DIR = REPO / "models"
 TRACKERS_DIR = REPO / "system-configurations" / "trackers"
 PERSON = 0  # COCO class id
+
+
+class _LowResMaskPredictor(SegmentationPredictor):
+    """Ultralytics' segmentation predictor, minus the per-person mask enlargement.
+
+    Copy of SegmentationPredictor.construct_result (Ultralytics 8.4.194, non-retina
+    path) with upsample=False: masks stay at prototype resolution.
+    """
+
+    def construct_result(self, pred, img, orig_img, img_path, proto):
+        masks = None
+        if pred.shape[0]:
+            masks = ops.process_mask(proto, pred[:, 6:], pred[:, :4], img.shape[2:], upsample=False)
+            pred[:, :4] = ops.scale_boxes(img.shape[2:], pred[:, :4], orig_img.shape)
+            keep = masks.amax((-2, -1)) > 0  # drop detections whose mask came out empty
+            if not keep.all():
+                pred, masks = pred[keep], masks[keep]
+        return Results(orig_img, path=img_path, names=self.model.names, boxes=pred[:, :6], masks=masks)
 
 
 class UltralyticsDetector(Detector):
@@ -69,10 +93,13 @@ class UltralyticsDetector(Detector):
         self._seen: dict[int, list[float]] = {}  # track_id -> [first ts, last ts]
 
     def detect(self, frame: Frame) -> Detections:
+        t0 = time.perf_counter()
         result = self.model.predict(
             frame.image, classes=[PERSON], conf=self._predict_conf, imgsz=self.imgsz,
             device=self.device, quantize=16 if self.half else None, verbose=False,
+            predictor=_LowResMaskPredictor,
         )[0]
+        t1 = time.perf_counter()
         boxes = result.boxes.cpu().numpy()
         frame_shape = frame.image.shape[:2]
 
@@ -81,6 +108,7 @@ class UltralyticsDetector(Detector):
         rows = self.tracker.update(boxes, frame.image)
         id_of = {int(r[7]): int(r[4]) for r in rows}
         id_of = self._confirmed(id_of, frame.ts)
+        t2 = time.perf_counter()
 
         keep = [i for i in range(len(boxes)) if i in id_of or boxes.conf[i] >= self.conf]
         tracks = tuple(
@@ -93,17 +121,24 @@ class UltralyticsDetector(Detector):
             for k, i in enumerate(keep)
         )
 
+        in_h, in_w = self._model_input_shape(frame)
         if result.masks is not None and keep:
-            masks = (result.masks.data[keep] > 0.5).to("cpu").numpy().astype(np.uint8) * 255
-            mask_shape = masks.shape[1:]
+            masks = (result.masks.data[keep] > 0).to("cpu").numpy().astype(np.uint8) * 255
         else:
-            mask_shape = self._model_input_shape(frame)
-            masks = np.zeros((0, *mask_shape), dtype=np.uint8)
+            masks = np.zeros((0, in_h // 4, in_w // 4), dtype=np.uint8)  # prototype grid = input / 4
 
-        return Detections(
+        dets = Detections(
             frame_idx=frame.idx, ts=frame.ts, tracks=tracks, masks=np.ascontiguousarray(masks),
-            geometry=_letterbox_geometry(frame_shape, mask_shape),
+            geometry=_mask_geometry(frame_shape, (in_h, in_w), masks.shape[1:]),
         )
+        # Milliseconds spent in each step of the last call, for profiling.
+        sp = result.speed
+        self.last_timing = {
+            "model_pre": sp["preprocess"], "model_infer": sp["inference"], "model_post": sp["postprocess"],
+            "ultralytics_other": 1000 * (t1 - t0) - sp["preprocess"] - sp["inference"] - sp["postprocess"],
+            "tracker": 1000 * (t2 - t1), "to_contract": 1000 * (time.perf_counter() - t2),
+        }
+        return dets
 
     # -- internals ------------------------------------------------------------
 
@@ -116,21 +151,24 @@ class UltralyticsDetector(Detector):
         return {i: tid for i, tid in id_of.items() if now - self._seen[tid][0] >= self.confirm_seconds}
 
     def _model_input_shape(self, frame: Frame) -> tuple[int, int]:
-        """(h, w) of the letterboxed model input, for frames where no masks came back."""
+        """(h, w) of the letterboxed model input for this frame size (computed once per size)."""
         key = frame.image.shape[:2]
         if key not in self._letterbox_shape:
             self._letterbox_shape[key] = self.model.predictor.pre_transform([frame.image])[0].shape[:2]
         return self._letterbox_shape[key]
 
 
-def _letterbox_geometry(frame_shape: tuple[int, int], mask_shape: tuple[int, int]) -> MaskGeometry:
-    """Same arithmetic as Ultralytics' LetterBox(center=True): scale to fit, pad evenly."""
+def _mask_geometry(frame_shape: tuple[int, int], input_shape: tuple[int, int],
+                   mask_shape: tuple[int, int]) -> MaskGeometry:
+    """Frame -> mask pixels. The letterbox step uses the same arithmetic as Ultralytics'
+    LetterBox(center=True) (scale to fit, pad evenly); masks are a further 1/4 of that."""
     h, w = frame_shape
-    mh, mw = mask_shape
-    r = min(mh / h, mw / w)
-    dw = (mw - round(w * r)) / 2
-    dh = (mh - round(h * r)) / 2
-    return MaskGeometry(scale=r, pad_x=float(round(dw - 0.1)), pad_y=float(round(dh - 0.1)), frame_shape=(h, w))
+    in_h, in_w = input_shape
+    r = min(in_h / h, in_w / w)
+    pad_x = round((in_w - round(w * r)) / 2 - 0.1)
+    pad_y = round((in_h - round(h * r)) / 2 - 0.1)
+    k = mask_shape[1] / in_w  # mask grid per input pixel (1/4)
+    return MaskGeometry(scale=r * k, pad_x=pad_x * k, pad_y=pad_y * k, frame_shape=(h, w))
 
 
 def _imgsz(value: Any) -> int | tuple[int, int]:

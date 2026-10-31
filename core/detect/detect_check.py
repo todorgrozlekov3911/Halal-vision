@@ -25,6 +25,7 @@ from core.contracts import CensoredFrame, Detections
 from core.detect.detector import UltralyticsDetector
 from core.detect.masks import outlines_in_frame
 from core.video.io_check import draw_header
+from core.video.pacing import Pacer
 from core.video.sinks import DisplaySink, FileSink
 from core.video.sources import MODES, FileSource
 
@@ -61,6 +62,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--no-display", action="store_true")
     p.add_argument("--max-frames", type=int, default=0)
     p.add_argument("--max-seconds", type=float, default=0, help="stop after this much wall-clock time")
+    p.add_argument("--unpaced", action="store_true", help="realtime mode: process as fast as possible "
+                   "instead of at expected_fps from the config")
     args = p.parse_args(argv)
 
     try:
@@ -72,6 +75,7 @@ def main(argv: list[str] | None = None) -> int:
     # The tracker counts processed frames: every frame offline, about expected_fps live.
     processed_fps = float(cfg.expected_fps) if source.is_live else source.fps
     detector = UltralyticsDetector(cfg, fps=processed_fps)
+    pacer = Pacer(processed_fps) if source.is_live and not args.unpaced else None
 
     sinks, display = [], None
     if not args.no_display:
@@ -81,7 +85,7 @@ def main(argv: list[str] | None = None) -> int:
         offline = args.mode == "offline"
         sinks.append(FileSink(args.out, fps=source.fps, audio_from=args.clip if offline else None, block=offline))
     if not sinks:
-        p.error("nothing to output: drop --no-display or add --out")
+        print("no output: timing only")
 
     d = cfg.detector
     print(f"{args.clip.name} | {d.model} imgsz={d.imgsz} on {d.device} | tracker={d.tracker} "
@@ -93,13 +97,29 @@ def main(argv: list[str] | None = None) -> int:
     det_ms = loop_fps = 0.0
     n, t_prev = 0, time.perf_counter()
     t_start = t_prev
+    prof: dict[str, list[float]] = {}  # step -> ms per frame
+
+    def lap(step: str, since: float) -> float:
+        now = time.perf_counter()
+        prof.setdefault(step, []).append(1000 * (now - since))
+        return now
+
     try:
-        while (frame := source.read()) is not None:
+        while True:
+            if pacer:
+                pacer.wait()
+            t_read = time.perf_counter()
+            frame = source.read()
+            if frame is None:
+                break
+            lap("read (decode + skip)", t_read)
             ts_first = frame.ts if n == 0 else ts_first
             ts_last = frame.ts
             t0 = time.perf_counter()
             dets = detector.detect(frame)
-            t1 = time.perf_counter()
+            t1 = lap("detect (total)", t0)
+            for step, ms in detector.last_timing.items():
+                prof.setdefault(f"  detect: {step}", []).append(ms)
             det_ms = 1000 * (t1 - t0) if n == 0 else 0.9 * det_ms + 100 * (t1 - t0)
             loop_fps = 0.9 * loop_fps + 0.1 / max(t1 - t_prev, 1e-6) if n else 0.0
             t_prev = t1
@@ -108,6 +128,7 @@ def main(argv: list[str] | None = None) -> int:
             for tid in ids_now:
                 life.setdefault(tid, [frame.ts, frame.ts])[1] = frame.ts
 
+            t_draw = time.perf_counter()
             img = frame.image.copy()
             draw_detections(img, dets)
             draw_header(img, "DETECTION VIEW - NOT CENSORED", [
@@ -116,8 +137,11 @@ def main(argv: list[str] | None = None) -> int:
                 f"people {len(dets.tracks)} (no ID {len(dets.tracks) - len(ids_now)})   IDs used so far {len(ids_seen)}",
             ])
             out = CensoredFrame(image=img, ts=frame.ts, idx=frame.idx)
+            t_show = lap("draw (copy + outlines + text)", t_draw)
             for sink in sinks:
                 sink.write(out)
+            t_end = lap("output (window / file)", t_show)
+            prof.setdefault("whole loop", []).append(1000 * (t_end - t_read))
             n += 1
             if ((display and display.quit_requested) or (args.max_frames and n >= args.max_frames)
                     or (args.max_seconds and time.perf_counter() - t_start >= args.max_seconds)):
@@ -130,13 +154,19 @@ def main(argv: list[str] | None = None) -> int:
             sink.close()
 
     took = time.perf_counter() - t_start
-    print(f"{n} frames in {took:.1f} s ({n / took:.1f} fps), skipped {source.skipped}")
+    paced = f", paced at {processed_fps:.0f} fps, {pacer.late} frames over budget" if pacer else ""
+    print(f"{n} frames in {took:.1f} s ({n / took:.1f} fps), skipped {source.skipped}{paced}")
     if life:
         spans = sorted(last - first for first, last in life.values())
         video_s = max(ts_last - ts_first, 1e-6)
         print(f"IDs: {len(spans)} total, {len(spans) / video_s * 10:.1f} per 10 s of video | "
               f"median lifetime {spans[len(spans) // 2]:.2f} s | under 0.5 s: {sum(x < 0.5 for x in spans)} | "
               f"over 5 s: {sum(x >= 5 for x in spans)}")
+    if prof:
+        print("time per frame (median ms, after the first 5 frames):")
+        for step, v in prof.items():
+            v = sorted(v[5:] or v)
+            print(f"  {step:34s} {v[len(v) // 2]:6.1f}")
     if args.out:
         print(f"wrote {args.out}")
     return 0
