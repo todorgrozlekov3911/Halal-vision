@@ -2,7 +2,11 @@
 # Pinned per T01. After a successful install, re-pin with:
 #   pip freeze > requirements/lock-<machine>.txt
 
-numpy==1.26.4            # insightface is not yet reliable with numpy 2.x
+# numpy/ml_dtypes: on 3.13+ onnx 1.19 needs ml_dtypes >= 0.6, which needs
+# numpy 2.x; on <= 3.12 keep numpy 1.26 (old insightface-stack compatibility).
+numpy==2.5.4; python_version >= "3.13"
+numpy==1.26.4; python_version < "3.13"
+ml_dtypes>=0.6.0; python_version >= "3.13"
 opencv-python==4.10.0.84
 ultralytics==8.3.49      # YOLO-seg + ByteTrack/BoT-SORT (decision #32)
 insightface==0.7.3       # face analysis: buffalo_l / buffalo_s (T16)
