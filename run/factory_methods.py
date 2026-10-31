@@ -19,9 +19,10 @@ from pathlib import Path
 from typing import Callable
 
 from core.config_table import CONFIG_DIR, ConfigError, ConfigTable
-from core.contracts import ConcealAllIdentity, IdentityModule, Renderer, Sink, Source
+from core.contracts import IdentityModule, Renderer, Sink, Source
 from core.detect.detector import UltralyticsDetector
 from core.eval.dump import DecisionDump
+from core.identity.component import make_identity
 from core.render.overlay import DebugOverlay
 from core.render.renderer import StyleRenderer
 from core.video.grabber import Grabber
@@ -149,7 +150,8 @@ def build_detector(ctx: BuildContext) -> UltralyticsDetector:
 
 
 def build_identity(ctx: BuildContext) -> IdentityModule:
-    return ConcealAllIdentity(sync=not ctx.live)     # stub until T15+
+    # T15 skeleton: worker thread + scheduling; conceals everyone until checks/policy land (T16-T22)
+    return make_identity(ctx.cfg, sync=not ctx.live)
 
 
 def build_renderer(ctx: BuildContext) -> Renderer:
