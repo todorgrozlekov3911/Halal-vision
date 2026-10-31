@@ -26,3 +26,6 @@ venv/
 *.onnx
 *.engine
 *_openvino_model/
+
+# Local outputs (exports, recordings)
+out/
