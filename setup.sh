@@ -41,14 +41,13 @@ source .venv/bin/activate
 pip install --upgrade pip
 
 # --- install ------------------------------------------------------------------
-echo "Installing requirements/base.txt"
-pip install -r requirements/base.txt
-
-echo "Installing $REQ_FILE"
+# One pip call so torch is resolved once: installing base.txt alone lets
+# ultralytics pull the default CUDA torch (~4 GB of nvidia-* wheels) on Intel.
+echo "Installing requirements/base.txt + $REQ_FILE"
 if [[ "$MACHINE" == "intel" ]]; then
-    pip install -r "$REQ_FILE" --extra-index-url "$CPU_TORCH_INDEX"
+    pip install -r requirements/base.txt -r "$REQ_FILE" --extra-index-url "$CPU_TORCH_INDEX"
 else
-    pip install -r "$REQ_FILE"
+    pip install -r requirements/base.txt -r "$REQ_FILE"
 fi
 
 # --- verify (T01 "done when") ---------------------------------------------------
