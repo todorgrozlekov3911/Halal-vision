@@ -1,0 +1,27 @@
+# Shared settings — every machine loads this first.
+# Precedence: shared.yaml < <machine>.yaml < --set key.path=value
+# All temporal rules are in seconds, compared against Frame.ts (decision #30).
+
+detector:
+  model: yolo26n-seg.pt
+  tracker: bytetrack        # our other option is botsort => open to testing currently 
+  conf: 0.25
+  imgsz: 640                # per-machine files override this
+
+timing:
+  mask_hold_seconds: 0.3          # keep drawing a lost subject's mask # tiny interval to continue rendering hiqab for instance if a subject is missing # this will by pass remvoing the asset for events like camera blures for few frame
+  gap_reverify_seconds: 0.15      # unseen longer -> back to concealed until re-verified # any time interval report for new id bigger than this gap is re-checked for existing confirmation / metadata on the face
+  track_buffer_seconds: 1.5       # tracker keeps a lost from sight ID <-> short term cached metadata "memory" , after that interval we recompute #NOTE: souly rellying on track library to get that this is an existing ID
+  recheck_whitelist_seconds: 1.0
+  recheck_gender_seconds: 2.0
+  retry_unsure_seconds: 0.3       # time interval for retrying to gain metadata for identity with terrible tresholds -> for instance a face below <min_face_px>
+  fade_out_seconds: 0.2           # fade when lifting a conceal ! NOTE: fading is for reviewing someone "white listed" -> as the policy of the system is that we "hide" any entity that is not yet identified
+
+policy:
+  viewer_profile: male      # only profile for now (decision #23)
+  conceal_style: niqab      # full cover until the eye-slit task (decision #33)
+  overlap_iou: 0.1          # box overlap that counts as a crossing
+
+identity:
+  face_model: buffalo_l     # intel overrides to buffalo_s
+  min_face_px: 32           # smaller faces give no evidence 

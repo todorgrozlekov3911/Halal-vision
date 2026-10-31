@@ -1,0 +1,12 @@
+# Intel laptop (iGPU / NPU via OpenVINO). Values here override shared.yaml.
+
+machine: intel
+expected_fps: 15            # gate M1 target; used to convert track_buffer_s to frames
+
+detector:
+  device: intel:gpu         # iGPU vs NPU — open item, decided in T14
+  half: false
+  imgsz: 416
+
+identity:
+  face_model: buffalo_s     # lighter face stack for the weaker machine
