@@ -20,7 +20,7 @@ SHARED = "shared"
 
 
 ALLOWED_VALUES = {
-    "detector.tracker": {"bytetrack", "botsort"},
+    "detector.tracker": {"bytetrack", "botsort", "botsort_reid"},
     "policy.conceal_style": {"niqab", "blur", "pixelate", "solid"},
     "policy.viewer_profile": {"male"},
     "identity.face_model": {"buffalo_l", "buffalo_s"},

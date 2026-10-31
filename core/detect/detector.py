@@ -6,7 +6,8 @@ Per frame:
   2. tracker.update()  Ultralytics' own BYTETracker / BOTSORT, driven here instead of
                        through model.track(), because model.track() throws away
                        people the tracker has not confirmed yet
-  3. Detections        tracked people get their ID; everyone else with
+  3. Detections        tracked people get their ID once the track is older than
+                       timing.confirm_track_seconds; everyone else with
                        score >= detector.conf comes back with track_id=None and is
                        concealed downstream (rule 4, fail closed)
 
@@ -42,17 +43,22 @@ class UltralyticsDetector(Detector):
         turn timing.track_buffer_seconds into the tracker's frame count."""
         det = cfg.detector
         self.conf = float(det.conf)
-        self.imgsz = int(det.imgsz)
+        self.imgsz = _imgsz(det.imgsz)
         self.device = str(det.device)
         self.half = bool(det.get("half", False))
         self.model = YOLO(str(_weights_for(det.model, self.device, self.imgsz)), task="segment")
 
         tracker_cfg = yaml.safe_load((TRACKERS_DIR / f"{det.tracker}.yaml").read_text())
         tracker_cfg["track_buffer"] = max(1, round(float(cfg.timing.track_buffer_seconds) * fps))
+        if tracker_cfg.get("with_reid") and tracker_cfg.get("model", "auto") != "auto":
+            tracker_cfg["model"] = str(MODELS_DIR / tracker_cfg["model"])  # ReID weights live in models/ too
+            tracker_cfg["device"] = "cpu" if self.device.startswith("intel") else self.device  # plain torch model
         self.tracker_args = IterableSimpleNamespace(**tracker_cfg)
         self.track_buffer_frames = tracker_cfg["track_buffer"]
         self._tracker_cls = TRACKER_MAP[tracker_cfg["tracker_type"]]
         self._predict_conf = min(self.conf, float(tracker_cfg["track_low_thresh"]))
+        self.confirm_seconds = float(cfg.timing.confirm_track_seconds)
+        self._forget_after = float(cfg.timing.track_buffer_seconds) + 1.0
         self._letterbox_shape: dict[tuple[int, int], tuple[int, int]] = {}
         self.reset()
 
@@ -60,6 +66,7 @@ class UltralyticsDetector(Detector):
 
     def reset(self) -> None:
         self.tracker = self._tracker_cls(args=self.tracker_args)
+        self._seen: dict[int, list[float]] = {}  # track_id -> [first ts, last ts]
 
     def detect(self, frame: Frame) -> Detections:
         result = self.model.predict(
@@ -73,6 +80,7 @@ class UltralyticsDetector(Detector):
         # (called on empty frames too: lost tracks must age so they expire on time)
         rows = self.tracker.update(boxes, frame.image)
         id_of = {int(r[7]): int(r[4]) for r in rows}
+        id_of = self._confirmed(id_of, frame.ts)
 
         keep = [i for i in range(len(boxes)) if i in id_of or boxes.conf[i] >= self.conf]
         tracks = tuple(
@@ -99,6 +107,14 @@ class UltralyticsDetector(Detector):
 
     # -- internals ------------------------------------------------------------
 
+    def _confirmed(self, id_of: dict[int, int], now: float) -> dict[int, int]:
+        """Keep only IDs whose track has existed for confirm_track_seconds (time, not frames)."""
+        for tid in id_of.values():
+            self._seen.setdefault(tid, [now, now])[1] = now
+        for tid in [t for t, (_, last) in self._seen.items() if now - last > self._forget_after]:
+            del self._seen[tid]
+        return {i: tid for i, tid in id_of.items() if now - self._seen[tid][0] >= self.confirm_seconds}
+
     def _model_input_shape(self, frame: Frame) -> tuple[int, int]:
         """(h, w) of the letterboxed model input, for frames where no masks came back."""
         key = frame.image.shape[:2]
@@ -117,16 +133,30 @@ def _letterbox_geometry(frame_shape: tuple[int, int], mask_shape: tuple[int, int
     return MaskGeometry(scale=r, pad_x=float(round(dw - 0.1)), pad_y=float(round(dh - 0.1)), frame_shape=(h, w))
 
 
-def _weights_for(model: str, device: str, imgsz: int) -> Path:
+def _imgsz(value: Any) -> int | tuple[int, int]:
+    """detector.imgsz: one number (square, e.g. 640) or [height, width] (e.g. [384, 640] for 16:9).
+    Both must be multiples of 32. A shape matching the video avoids wasting model time on padding."""
+    if isinstance(value, (list, tuple)):
+        h, w = (int(v) for v in value)
+        if h % 32 or w % 32:
+            raise ValueError(f"detector.imgsz {value}: height and width must be multiples of 32")
+        return h, w
+    if int(value) % 32:
+        raise ValueError(f"detector.imgsz {value}: must be a multiple of 32")
+    return int(value)
+
+
+def _weights_for(model: str, device: str, imgsz: int | tuple[int, int]) -> Path:
     """models/<name>.pt (downloaded by Ultralytics if missing). For intel:* devices the
     .pt is exported once to OpenVINO at this imgsz and that folder is used instead."""
     MODELS_DIR.mkdir(exist_ok=True)
     pt = MODELS_DIR / model
     if not device.startswith("intel"):
         return pt
-    ov_dir = MODELS_DIR / f"{pt.stem}_{imgsz}_openvino_model"  # suffix is how Ultralytics spots the format
+    size = f"{imgsz[0]}x{imgsz[1]}" if isinstance(imgsz, tuple) else str(imgsz)
+    ov_dir = MODELS_DIR / f"{pt.stem}_{size}_openvino_model"  # suffix is how Ultralytics spots the format
     if not (ov_dir / "metadata.yaml").is_file():
-        exported = Path(YOLO(str(pt)).export(format="openvino", imgsz=imgsz, dynamic=False))
+        exported = Path(YOLO(str(pt)).export(format="openvino", imgsz=list(imgsz) if isinstance(imgsz, tuple) else imgsz, dynamic=False))
         if ov_dir.exists():
             shutil.rmtree(ov_dir)
         exported.rename(ov_dir)

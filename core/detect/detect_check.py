@@ -60,6 +60,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--out", type=Path, help="also write an H.264 file")
     p.add_argument("--no-display", action="store_true")
     p.add_argument("--max-frames", type=int, default=0)
+    p.add_argument("--max-seconds", type=float, default=0, help="stop after this much wall-clock time")
     args = p.parse_args(argv)
 
     try:
@@ -74,7 +75,7 @@ def main(argv: list[str] | None = None) -> int:
 
     sinks, display = [], None
     if not args.no_display:
-        display = DisplaySink(window=f"detect_check - {args.clip.name}")
+        display = DisplaySink(window=f"detect_check - {args.clip.name} - {cfg.detector.tracker}")
         sinks.append(display)
     if args.out:
         offline = args.mode == "offline"
@@ -87,11 +88,15 @@ def main(argv: list[str] | None = None) -> int:
           f"track_buffer={detector.track_buffer_frames} frames ({cfg.timing.track_buffer_seconds} s at {processed_fps:.1f} fps)")
 
     ids_seen: set[int] = set()
+    life: dict[int, list[float]] = {}  # track_id -> [first ts, last ts]
+    ts_first = ts_last = 0.0
     det_ms = loop_fps = 0.0
     n, t_prev = 0, time.perf_counter()
     t_start = t_prev
     try:
         while (frame := source.read()) is not None:
+            ts_first = frame.ts if n == 0 else ts_first
+            ts_last = frame.ts
             t0 = time.perf_counter()
             dets = detector.detect(frame)
             t1 = time.perf_counter()
@@ -100,19 +105,22 @@ def main(argv: list[str] | None = None) -> int:
             t_prev = t1
             ids_now = [t.track_id for t in dets.tracks if t.track_id is not None]
             ids_seen.update(ids_now)
+            for tid in ids_now:
+                life.setdefault(tid, [frame.ts, frame.ts])[1] = frame.ts
 
             img = frame.image.copy()
             draw_detections(img, dets)
             draw_header(img, "DETECTION VIEW - NOT CENSORED", [
                 f"frame {frame.idx}   ts {frame.ts:.2f} s   skipped {source.skipped}",
-                f"detect {det_ms:5.1f} ms   loop {loop_fps:4.1f} fps",
+                f"{cfg.detector.tracker}   detect {det_ms:5.1f} ms   loop {loop_fps:4.1f} fps",
                 f"people {len(dets.tracks)} (no ID {len(dets.tracks) - len(ids_now)})   IDs used so far {len(ids_seen)}",
             ])
             out = CensoredFrame(image=img, ts=frame.ts, idx=frame.idx)
             for sink in sinks:
                 sink.write(out)
             n += 1
-            if (display and display.quit_requested) or (args.max_frames and n >= args.max_frames):
+            if ((display and display.quit_requested) or (args.max_frames and n >= args.max_frames)
+                    or (args.max_seconds and time.perf_counter() - t_start >= args.max_seconds)):
                 break
     except KeyboardInterrupt:
         pass
@@ -122,7 +130,13 @@ def main(argv: list[str] | None = None) -> int:
             sink.close()
 
     took = time.perf_counter() - t_start
-    print(f"{n} frames in {took:.1f} s ({n / took:.1f} fps), {len(ids_seen)} distinct IDs, skipped {source.skipped}")
+    print(f"{n} frames in {took:.1f} s ({n / took:.1f} fps), skipped {source.skipped}")
+    if life:
+        spans = sorted(last - first for first, last in life.values())
+        video_s = max(ts_last - ts_first, 1e-6)
+        print(f"IDs: {len(spans)} total, {len(spans) / video_s * 10:.1f} per 10 s of video | "
+              f"median lifetime {spans[len(spans) // 2]:.2f} s | under 0.5 s: {sum(x < 0.5 for x in spans)} | "
+              f"over 5 s: {sum(x >= 5 for x in spans)}")
     if args.out:
         print(f"wrote {args.out}")
     return 0

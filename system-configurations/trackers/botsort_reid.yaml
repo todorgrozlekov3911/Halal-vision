@@ -1,0 +1,18 @@
+# BoT-SORT + appearance ReID: the "accurate" option (detector.tracker: botsort_reid).
+# Same as botsort.yaml, plus a small classifier (yolo26n-cls) that embeds each person
+# crop so people are matched by appearance too. YOLO26 cannot share its own features
+# for this (end-to-end head), hence the separate model. Costs time per person.
+
+tracker_type: botsort # (str) Tracker backend: botsort
+track_high_thresh: 0.25 # (float) First-stage match threshold; raise for cleaner tracks, lower to keep more
+track_low_thresh: 0.1 # (float) Second-stage threshold for low-score matches; balances recovery vs drift
+new_track_thresh: 0.4 # (float) Only detections this confident start a new track (Ultralytics default 0.25 gave many 1-10 frame IDs); weaker ones still extend existing tracks
+match_thresh: 0.8 # (float) Association similarity threshold (IoU/cost); tune with detector quality
+fuse_score: True # (bool) Fuse detection score with motion/IoU for matching; stabilizes weak detections
+
+gmc_method: sparseOptFlow # (str) Global motion compensation: sparseOptFlow|orb|sift|ecc|none; helps moving camera scenes
+
+proximity_thresh: 0.3 # (float) Appearance is only compared for boxes overlapping a track at least this much (IoU); Ultralytics default 0.5
+appearance_thresh: 0.8 # (float) Min appearance similarity for ReID; raise to avoid identity swaps
+with_reid: True # (bool) Match by appearance as well as position
+model: yolo26n-cls.pt # (str) ReID model, loaded from models/ (downloaded on first use)

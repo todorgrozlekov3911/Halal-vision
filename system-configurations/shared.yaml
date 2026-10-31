@@ -4,13 +4,14 @@
 
 detector:
   model: yolo26n-seg.pt
-  tracker: bytetrack        # our other option is botsort => open to testing currently 
+  tracker: bytetrack        # bytetrack = fast | botsort_reid = accurate (appearance ReID, slower) | botsort
   conf: 0.25
   imgsz: 640                # per-machine files override this
 
 timing:
   mask_hold_seconds: 0.3          # keep drawing a lost subject's mask # tiny interval to continue rendering hiqab for instance if a subject is missing # this will by pass remvoing the asset for events like camera blures for few frame
   gap_reverify_seconds: 0.15      # unseen longer -> back to concealed until re-verified # any time interval report for new id bigger than this gap is re-checked for existing confirmation / metadata on the face
+  confirm_track_seconds: 0.1      # a new track stays ID-less (concealed, not identified) this long, so one-frame flickers never get an ID
   track_buffer_seconds: 1.5       # tracker keeps a lost from sight ID <-> short term cached metadata "memory" , after that interval we recompute #NOTE: souly rellying on track library to get that this is an existing ID
   recheck_whitelist_seconds: 1.0
   recheck_gender_seconds: 2.0
