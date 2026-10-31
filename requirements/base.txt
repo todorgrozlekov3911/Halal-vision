@@ -1,0 +1,11 @@
+# Shared dependencies — installed on every machine.
+# Pinned per T01. After a successful install, re-pin with:
+#   pip freeze > requirements/lock-<machine>.txt
+
+numpy==1.26.4            # insightface is not yet reliable with numpy 2.x
+opencv-python==4.10.0.84
+ultralytics==8.3.49      # YOLO-seg + ByteTrack/BoT-SORT (decision #32)
+insightface==0.7.3       # face analysis: buffalo_l / buffalo_s (T16)
+lapx==0.5.11             # required by ultralytics trackers
+pyyaml==6.0.2            # shared + per-machine config (T03)
+ffmpeg-python==0.2.0     # writer thread / audio remux (T07)

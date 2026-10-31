@@ -1,0 +1,9 @@
+# Intel laptop — iGPU / NPU stack via OpenVINO, CPU-only torch.
+# The +cpu torch wheels come from the extra index URL that setup.sh passes
+# (https://download.pytorch.org/whl/cpu); installing this file with plain
+# `pip install -r` will fail without it.
+
+torch==2.5.1+cpu
+torchvision==0.20.1+cpu
+openvino==2024.6.0
+onnxruntime-openvino==1.20.0
