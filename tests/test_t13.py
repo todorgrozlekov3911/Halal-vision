@@ -182,6 +182,12 @@ def test_overlay_allowed_on_dev_window() -> None:
 # -- no silent device fallback -------------------------------------------------
 
 
+def test_source_dispatch_camera_vs_file() -> None:
+    from run.factory_methods import source_kind
+    assert source_kind("/dev/video0") == "camera"
+    assert source_kind("clips/x.mp4") == "file"
+
+
 def test_openvino_device_matching() -> None:
     assert _openvino_sees("GPU", ["CPU", "GPU"])
     assert _openvino_sees("GPU", ["CPU", "GPU.0"])

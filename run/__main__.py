@@ -18,7 +18,7 @@ from run.runner import PipelineFailure
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="run", description=__doc__.split("\n")[0])
-    p.add_argument("clip", type=Path, help="input video (CameraSource comes later)")
+    p.add_argument("clip", type=Path, help="input: a video file, or a camera as /dev/videoN")
     p.add_argument("--machine", required=True, choices=available_machines())
     p.add_argument("--set", dest="sets", action="append", default=[], metavar="KEY.PATH=VALUE")
     p.add_argument("--mode", choices=MODES, default="offline")

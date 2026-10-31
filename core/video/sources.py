@@ -7,7 +7,8 @@ FileSource has two modes:
               frames the caller was too slow for are skipped, ts = capture clock.
               Used for daily development and latency testing.
 
-CameraSource is not written yet (rest of T05).
+CameraSource covers any V4L2 device (/dev/videoN): the laptop webcam, a USB
+camera on the glasses, the phone via scrcpy. Always live; ts = capture clock.
 """
 from __future__ import annotations
 
@@ -98,3 +99,55 @@ class FileSource(Source):
                 self._next_idx += 1
                 self.skipped += 1
         return self._read_next(ts=time.perf_counter())
+
+
+class CameraSource(Source):
+    """A V4L2 camera device. Requests MJPG at the given size and rate; cameras
+    grant what they can, so the real shape and rate are probed, not assumed."""
+
+    def __init__(self, device: str | int, width: int = 1280, height: int = 720,
+                 fps: float = 30.0) -> None:
+        self.device = f"/dev/video{device}" if isinstance(device, int) else str(device)
+        self._cap = cv2.VideoCapture(self.device, cv2.CAP_V4L2)
+        if not self._cap.isOpened():
+            raise OSError(f"OpenCV cannot open camera {self.device}")
+        self._cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+        self._cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+        self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+        self._cap.set(cv2.CAP_PROP_FPS, fps)
+        ok, image = self._cap.read()        # probe what the camera actually granted
+        if not ok:
+            self._cap.release()
+            raise OSError(f"camera {self.device} opened but delivers no frames")
+        self.source_id = f"camera:{self.device}"
+        self._shape = image.shape[:2]
+        self._fps = self._cap.get(cv2.CAP_PROP_FPS) or fps
+        self.end_reason = ""
+        self._next_idx = 0
+
+    # -- Source interface ---------------------------------------------------
+
+    @property
+    def fps(self) -> float:
+        return self._fps
+
+    @property
+    def frame_shape(self) -> tuple[int, int]:
+        return self._shape
+
+    @property
+    def is_live(self) -> bool:
+        return True
+
+    def read(self) -> Frame | None:
+        ok, image = self._cap.read()       # blocks until the camera has a frame
+        if not ok:
+            self.end_reason = f"camera read() failed at frame {self._next_idx} (unplugged?)"
+            return None
+        frame = Frame(image=image, ts=time.perf_counter(), idx=self._next_idx,
+                      source_id=self.source_id)
+        self._next_idx += 1
+        return frame
+
+    def close(self) -> None:
+        self._cap.release()

@@ -28,7 +28,7 @@ from core.video.grabber import Grabber
 from core.video.meters import LoopMeters
 from core.video.pacing import Pacer
 from core.video.sinks import DisplaySink, FileSink
-from core.video.sources import FileSource
+from core.video.sources import CameraSource, FileSource
 from run.runner import FailSafe, Runner
 
 log = logging.getLogger("halal_vision.build")
@@ -61,14 +61,23 @@ def _file_source(args: argparse.Namespace) -> Source:
     return FileSource(args.clip, mode=args.mode)
 
 
-# later: @register_source("camera") (CameraSource, T05 rest),
-# @register_source("phone") (scrcpy, T27)
+@register_source("camera")
+def _camera_source(args: argparse.Namespace) -> Source:
+    return CameraSource(str(args.clip))
+
+
+# later: @register_source("phone") (scrcpy, T27) — until then scrcpy's
+# v4l2 sink is a /dev/videoN and the camera source covers it
+
+
+def source_kind(clip) -> str:
+    return "camera" if str(clip).startswith("/dev/video") else "file"
 
 
 def build_source(args: argparse.Namespace) -> Source:
     if not args.clip:
-        raise ConfigError("no input given (clip path)")
-    return SOURCES["file"](args)
+        raise ConfigError("no input given (clip path or /dev/videoN)")
+    return SOURCES[source_kind(args.clip)](args)
 
 
 # -- sinks -------------------------------------------------------------------
