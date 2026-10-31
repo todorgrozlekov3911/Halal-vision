@@ -70,7 +70,8 @@ class UltralyticsDetector(Detector):
         self.imgsz = _imgsz(det.imgsz)
         self.device = str(det.device)
         self.half = bool(det.get("half", False))
-        self.model = YOLO(str(_weights_for(det.model, self.device, self.imgsz)), task="segment")
+        self.int8 = bool(det.get("int8", False))
+        self.model = YOLO(str(_weights_for(det.model, self.device, self.imgsz, self.int8)), task="segment")
 
         tracker_cfg = yaml.safe_load((TRACKERS_DIR / f"{det.tracker}.yaml").read_text())
         tracker_cfg["track_buffer"] = max(1, round(float(cfg.timing.track_buffer_seconds) * fps))
@@ -184,17 +185,22 @@ def _imgsz(value: Any) -> int | tuple[int, int]:
     return int(value)
 
 
-def _weights_for(model: str, device: str, imgsz: int | tuple[int, int]) -> Path:
+def _weights_for(model: str, device: str, imgsz: int | tuple[int, int], int8: bool = False) -> Path:
     """models/<name>.pt (downloaded by Ultralytics if missing). For intel:* devices the
-    .pt is exported once to OpenVINO at this imgsz and that folder is used instead."""
+    .pt is exported once to OpenVINO at this imgsz and that folder is used instead.
+    int8: quantize to 8-bit during export (needs nncf), calibrated on Ultralytics'
+    coco128-seg sample images (downloaded on first use)."""
     MODELS_DIR.mkdir(exist_ok=True)
     pt = MODELS_DIR / model
     if not device.startswith("intel"):
         return pt
     size = f"{imgsz[0]}x{imgsz[1]}" if isinstance(imgsz, tuple) else str(imgsz)
-    ov_dir = MODELS_DIR / f"{pt.stem}_{size}_openvino_model"  # suffix is how Ultralytics spots the format
+    precision = "_int8" if int8 else ""
+    ov_dir = MODELS_DIR / f"{pt.stem}_{size}{precision}_openvino_model"  # suffix is how Ultralytics spots the format
     if not (ov_dir / "metadata.yaml").is_file():
-        exported = Path(YOLO(str(pt)).export(format="openvino", imgsz=list(imgsz) if isinstance(imgsz, tuple) else imgsz, dynamic=False))
+        kwargs = {"quantize": 8, "data": "coco128-seg.yaml"} if int8 else {}
+        exported = Path(YOLO(str(pt)).export(format="openvino", imgsz=list(imgsz) if isinstance(imgsz, tuple) else imgsz,
+                                             dynamic=False, **kwargs))
         if ov_dir.exists():
             shutil.rmtree(ov_dir)
         exported.rename(ov_dir)

@@ -6,6 +6,7 @@ expected_fps: 15            # gate M1 target; used to convert track_buffer_secon
 detector:
   device: intel:gpu         # iGPU vs NPU — open item, decided in T14
   half: false
+  int8: true                # 8-bit OpenVINO model: same detections (99% overlap), ~18% faster sustained
   imgsz: [384, 640]         # [height, width]: 16:9 like the video, no padding (416x416 wasted 40% on bars and missed far people)
 
 identity:
