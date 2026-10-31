@@ -31,6 +31,35 @@ if [[ ! -f "$REQ_FILE" ]]; then
     exit 1
 fi
 
+if [[ $EUID -eq 0 ]]; then
+    echo "Run without sudo: .venv would end up owned by root. The script asks for sudo itself when needed." >&2
+    exit 1
+fi
+
+# --- system packages (sudo, only if missing) ------------------------------------
+# Only what pip can't provide: the ffmpeg binary (ffmpeg-python wraps it) and,
+# on Intel, the iGPU compute runtime OpenVINO needs to see the GPU.
+MISSING=()
+command -v ffmpeg >/dev/null 2>&1 || MISSING+=(ffmpeg)
+if [[ "$MACHINE" == "intel" ]]; then
+    for pkg in intel-opencl-icd libze1 libze-intel-gpu1; do
+        dpkg -s "$pkg" >/dev/null 2>&1 || MISSING+=("$pkg")
+    done
+fi
+if (( ${#MISSING[@]} )); then
+    echo "Installing system packages (needs sudo): ${MISSING[*]}"
+    sudo apt-get update
+    sudo apt-get install -y "${MISSING[@]}"
+fi
+
+# The NPU device (/dev/accel/accel0) is only readable by the render group.
+RELOGIN=0
+if [[ "$MACHINE" == "intel" ]] && ! id -nG "$USER" | grep -qw render; then
+    echo "Adding $USER to the render group (needs sudo)"
+    sudo usermod -aG render "$USER"
+    RELOGIN=1
+fi
+
 # --- venv ---------------------------------------------------------------------
 if [[ ! -d .venv ]]; then
     echo "Creating virtualenv at .venv"
@@ -53,7 +82,8 @@ fi
 # --- verify (T01 "done when") ---------------------------------------------------
 echo
 echo "Verifying installation..."
-python - "$MACHINE" <<'PY'
+VERIFY_OK=1
+python - "$MACHINE" <<'PY' || VERIFY_OK=0
 import sys
 
 machine = sys.argv[1]
@@ -91,4 +121,11 @@ sys.exit(1 if failed else 0)
 PY
 
 echo
+if (( RELOGIN )); then
+    echo "You were added to the render group: log out and back in, then rerun ./setup.sh to check the NPU."
+fi
+if (( ! VERIFY_OK )); then
+    echo "Verification FAILED (see above)." >&2
+    exit 1
+fi
 echo "Done. Activate the environment with:  source .venv/bin/activate"
