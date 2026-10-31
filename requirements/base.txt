@@ -13,3 +13,4 @@ insightface==0.7.3       # face analysis: buffalo_l / buffalo_s (T16)
 lapx==0.5.11             # required by ultralytics trackers
 pyyaml==6.0.2            # shared + per-machine config (T03)
 ffmpeg-python==0.2.0     # writer thread / audio remux (T07)
+pytest==9.2.0            # tests/ (python -m pytest -q tests)
