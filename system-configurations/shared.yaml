@@ -9,7 +9,8 @@ detector:
   imgsz: 640                # per-machine files override this
 
 timing:
-  mask_hold_seconds: 0.3          # keep drawing a lost subject's mask # tiny interval to continue rendering hiqab for instance if a subject is missing # this will by pass remvoing the asset for events like camera blures for few frame
+  mask_hold_seconds: 0.5          # keep drawing a lost subject's mask # tiny interval to continue rendering hiqab for instance if a subject is missing # this will by pass remvoing the asset for events like camera blures for few frame
+  mask_smooth_seconds: 0.15       # masks are a running average over about this long, so shapes change gradually, not per frame
   gap_reverify_seconds: 0.15      # unseen longer -> back to concealed until re-verified # any time interval report for new id bigger than this gap is re-checked for existing confirmation / metadata on the face
   confirm_track_seconds: 0.1      # a new track stays ID-less (concealed, not identified) this long, so one-frame flickers never get an ID
   track_buffer_seconds: 1.5       # tracker keeps a lost from sight ID <-> short term cached metadata "memory" , after that interval we recompute #NOTE: souly rellying on track library to get that this is an existing ID
@@ -22,6 +23,19 @@ policy:
   viewer_profile: male      # only profile for now (decision #23)
   conceal_style: niqab      # full cover until the eye-slit task (decision #33)
   overlap_iou: 0.1          # box overlap that counts as a crossing
+
+render:
+  mask_grow_fraction: 0.04       # grow each covered person's mask by this share of their box height (hair, loose edges)
+  mask_grow_min_fraction: 0.01   # ...but by at least this share of the frame height (far, small people)
+  edge_fade: 64                  # soft outer edge: mask certainty levels just below the cut (128) that fade out; 0 = hard edge
+  niqab_color: [26, 22, 20]      # niqab: BGR, near-black with a faint blue
+  outline_fraction: 0.0025       # outline around each covered person, as a share of the frame height (~3 px at 1080p); 0 = none
+  outline_color: [110, 110, 110] # BGR
+  min_person_height: 0.12        # cover people at least this share of the frame height (~130 px at 1080p): far people and most
+                                 # false detections are small. LEAK TRADE-OFF (decided for now): people further away are shown
+  blur_rows: 36                  # blur: shrink the frame to this many rows, then enlarge; fewer = stronger
+  pixelate_rows: 32              # pixelate: blocks per frame height; fewer = bigger blocks
+  solid_color: [128, 128, 128]   # solid: BGR fill colour
 
 identity:
   face_model: buffalo_l     # intel overrides to buffalo_s

@@ -71,6 +71,9 @@ class CensoredFrame:
 # Detection output: one bundle per frame
 # --------------------------------------------------------------------------
 
+MASK_CUT = 128   # a mask pixel at or above this certainty (0..255) is the person
+
+
 @dataclass(frozen=True)
 class MaskGeometry:
     """Maps frame pixels to mask pixels (the pixel grid of ``Detections.masks``).
@@ -119,15 +122,17 @@ class Detections:
     """Everything the detector found in one frame.
 
     Masks are whole-image masks at the model's small resolution (mask space),
-    uint8 with 0 = not this person and 255 = this person, on the CPU. One mask
-    per track, ID-less tracks included. Read them through ``mask_of`` and
+    uint8 on the CPU, soft: 0..255 is how sure the model is that the pixel is this
+    person, and >= MASK_CUT counts as the person. Soft values let the yes/no cut
+    happen after enlarging, so outlines move smoothly. One mask per track, ID-less
+    tracks included. Read them through ``mask_of`` and
     ``union_of`` so the storage format can change later without touching callers.
     """
 
     frame_idx: int
     ts: float
     tracks: tuple[Track, ...]
-    masks: np.ndarray        # (N, h, w) uint8 0/255, N == len(tracks); locked
+    masks: np.ndarray        # (N, h, w) uint8 0..255 certainty, N == len(tracks); locked
     geometry: MaskGeometry
 
     def __post_init__(self) -> None:

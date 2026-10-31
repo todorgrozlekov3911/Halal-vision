@@ -14,8 +14,8 @@ import numpy as np
 import pytest
 
 from core.config_table import load_config
-from core.contracts import Frame
-from core.detect.detector import UltralyticsDetector, _imgsz, _mask_geometry
+from core.contracts import MASK_CUT, Frame
+from core.detect.detector import UltralyticsDetector, _imgsz, _mask_geometry, openvino_device, runs_on
 from core.detect.masks import outlines_in_frame
 
 CLIP = Path(__file__).resolve().parents[1] / "clips" / "berlin_people_crossing.mp4"
@@ -127,10 +127,40 @@ def test_people_found_id_less_first_then_tracked(street_frames):
     assert sum(t.track_id is not None for t in last.tracks) >= 3   # 0.3 s later they are
 
     assert last.masks.shape == (len(last.tracks), 96, 160)
-    assert last.masks.dtype == np.uint8 and set(np.unique(last.masks)) <= {0, 255}
+    assert last.masks.dtype == np.uint8                       # soft: 0..255 certainty
+    assert len(np.unique(last.masks)) > 2, "masks keep the model's certainty, not just yes/no"
     for t in last.tracks:
-        ys, xs = np.nonzero(last.mask_of(t))
+        ys, xs = np.nonzero(last.mask_of(t) >= MASK_CUT)
         assert len(xs), "every returned person has a non-empty mask"
         cx, cy = (np.array([xs.mean(), ys.mean()]) - [last.geometry.pad_x, last.geometry.pad_y]) / last.geometry.scale
         x1, y1, x2, y2 = t.bbox
         assert x1 <= cx <= x2 and y1 <= cy <= y2, "mask centre lies inside the person's box"
+
+
+# -- which OpenVINO device really runs the model ---------------------------------------
+
+@pytest.mark.parametrize("available, device, expected", [
+    (["CPU", "GPU", "NPU"], "intel:npu", "NPU"),
+    (["CPU", "GPU"], "intel:npu", "AUTO"),         # no render group: the NPU is invisible
+    (["CPU"], "intel:gpu", "CPU"),
+    (["CPU", "GPU.0", "GPU.1"], "intel:gpu", "GPU"),
+])
+def test_openvino_device_falls_back_like_ultralytics(monkeypatch, available, device, expected):
+    import openvino as ov
+    monkeypatch.setattr(ov, "Core", lambda: type("C", (), {"available_devices": available})())
+    assert openvino_device(device) == expected
+
+
+def test_models_that_break_auto_fall_back_to_the_gpu(monkeypatch):
+    import openvino as ov
+    monkeypatch.setattr(ov, "Core", lambda: type("C", (), {"available_devices": ["CPU", "GPU"]})())
+    assert openvino_device("intel:npu", auto_ok=False) == "GPU"
+    monkeypatch.setattr(ov, "Core", lambda: type("C", (), {"available_devices": ["CPU"]})())
+    assert openvino_device("intel:npu", auto_ok=False) == "CPU"
+
+
+def test_runs_on_says_when_the_npu_is_missing():
+    assert runs_on("intel:npu", "NPU") == "NPU"
+    assert runs_on("intel:npu", "AUTO") == "AUTO: NPU unavailable (no render group)"
+    assert runs_on("intel:npu", "GPU") == "GPU: NPU unavailable (no render group)"
+    assert runs_on("cuda:0", None) == "cuda:0"

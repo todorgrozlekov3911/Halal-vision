@@ -9,6 +9,8 @@ numpy==1.26.4; python_version < "3.13"
 ml_dtypes>=0.6.0; python_version >= "3.13"
 opencv-python==4.10.0.84
 ultralytics==8.4.194     # YOLO26-seg + ByteTrack/BoT-SORT (decision #32); 8.3.x has no YOLO26
+rfdetr==1.4.3            # RF-DETR-Seg, the alternative person model (core/detect/rf_detr.py)
+transformers==4.57.6     # rfdetr's backbone; rfdetr >= 1.5 wants transformers 5, which needs torch >= 2.6
 insightface==0.7.3       # face analysis: buffalo_l / buffalo_s (T16)
 lapx==0.5.11             # required by ultralytics trackers
 pyyaml==6.0.2            # shared + per-machine config (T03)

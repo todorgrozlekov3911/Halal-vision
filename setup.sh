@@ -37,10 +37,11 @@ if [[ $EUID -eq 0 ]]; then
 fi
 
 # --- system packages (sudo, only if missing) ------------------------------------
-# Only what pip can't provide: the ffmpeg binary (ffmpeg-python wraps it) and,
-# on Intel, the iGPU compute runtime OpenVINO needs to see the GPU.
+# Only what pip can't provide: the ffmpeg binary (ffmpeg-python wraps it), Tk for
+# the dev player and, on Intel, the iGPU compute runtime OpenVINO needs to see the GPU.
 MISSING=()
 command -v ffmpeg >/dev/null 2>&1 || MISSING+=(ffmpeg)
+dpkg -s python3-tk >/dev/null 2>&1 || MISSING+=(python3-tk)   # Tk for the dev player (core/player.py)
 if [[ "$MACHINE" == "intel" ]]; then
     for pkg in intel-opencl-icd libze1 libze-intel-gpu1; do
         dpkg -s "$pkg" >/dev/null 2>&1 || MISSING+=("$pkg")

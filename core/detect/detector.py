@@ -1,7 +1,9 @@
-"""Person detector + tracker (T08): Ultralytics YOLO26-seg behind core.contracts.Detector.
+"""Person detector + tracker (T08): YOLO26-seg (or RF-DETR-Seg, rf_detr.py) behind core.contracts.Detector.
+
+    make_detector(cfg, fps)   picks the class from detector.model: rf-detr-seg-* or an Ultralytics .pt
 
 Per frame:
-  1. model.predict()   people only, at the tracker's low threshold so its second
+  1. model             people only, at the tracker's low threshold so its second
                        (low-score) matching stage has something to work with
   2. tracker.update()  Ultralytics' own BYTETracker / BOTSORT, driven here instead of
                        through model.track(), because model.track() throws away
@@ -12,12 +14,15 @@ Per frame:
                        concealed downstream (rule 4, fail closed)
 
 Masks stay at the model's prototype resolution (1/4 of the model input, e.g.
-96x160 for 384x640), letterbox padding included; MaskGeometry says how they map
+96x160 for 384x640), soft (0..255 certainty), letterbox padding included; MaskGeometry says how they map
 onto the frame. Ultralytics would enlarge every person's mask to the full model
 input on the CPU; we skip that, because the mask pipeline (T10) merges the
 concealed people at low resolution and enlarges once, straight to the frame.
 
-No other module imports Ultralytics: everything leaves here as contracts types.
+TrackingDetector does steps 2 and 3 for every model; a model class only does step 1
+(_infer). RF-DETR's masks map to the frame without padding, see rf_detr.py.
+
+No module outside core/detect imports Ultralytics: everything leaves as contracts types.
 """
 from __future__ import annotations
 
@@ -29,12 +34,12 @@ from typing import Any
 import numpy as np
 import yaml
 from ultralytics import YOLO
-from ultralytics.engine.results import Results
+from ultralytics.engine.results import Boxes, Results
 from ultralytics.models.yolo.segment import SegmentationPredictor
 from ultralytics.trackers.track import TRACKER_MAP
 from ultralytics.utils import IterableSimpleNamespace, ops
 
-from core.contracts import Detections, Detector, Frame, MaskGeometry, Track
+from core.contracts import MASK_CUT, Detections, Detector, Frame, MaskGeometry, Track
 
 REPO = Path(__file__).resolve().parents[2]
 MODELS_DIR = REPO / "models"
@@ -43,39 +48,90 @@ PERSON = 0  # COCO class id
 
 
 class _LowResMaskPredictor(SegmentationPredictor):
-    """Ultralytics' segmentation predictor, minus the per-person mask enlargement.
+    """Ultralytics' segmentation predictor, minus the per-person mask enlargement, with soft masks.
 
-    Copy of SegmentationPredictor.construct_result (Ultralytics 8.4.194, non-retina
-    path) with upsample=False: masks stay at prototype resolution.
+    Based on SegmentationPredictor.construct_result (Ultralytics 8.4.194, non-retina
+    path): masks stay at prototype resolution, and keep the model's per-pixel
+    certainty (sigmoid, as uint8 0..255) instead of Ultralytics' yes/no cut. The cut
+    happens after enlarging (mask pipeline), so outlines fall between mask pixels
+    and move smoothly instead of in 12-pixel steps.
     """
 
     def construct_result(self, pred, img, orig_img, img_path, proto):
         masks = None
         if pred.shape[0]:
-            masks = ops.process_mask(proto, pred[:, 6:], pred[:, :4], img.shape[2:], upsample=False)
+            masks = _soft_masks(proto, pred[:, 6:], pred[:, :4], img.shape[2:])
             pred[:, :4] = ops.scale_boxes(img.shape[2:], pred[:, :4], orig_img.shape)
-            keep = masks.amax((-2, -1)) > 0  # drop detections whose mask came out empty
+            keep = masks.amax((-2, -1)) >= MASK_CUT  # drop detections whose mask came out empty
             if not keep.all():
                 pred, masks = pred[keep], masks[keep]
         return Results(orig_img, path=img_path, names=self.model.names, boxes=pred[:, :6], masks=masks)
 
 
-class UltralyticsDetector(Detector):
+def _soft_masks(protos, coefficients, boxes, input_shape):
+    """ops.process_mask(upsample=False) without the yes/no cut: sigmoid certainty as uint8 0..255,
+    zero outside each person's box. 128 is where Ultralytics would cut."""
+    c, mh, mw = protos.shape
+    masks = (coefficients.float() @ protos.float().view(c, -1)).view(-1, mh, mw).sigmoid_()
+    ratios = boxes.new_tensor([[mw / input_shape[1], mh / input_shape[0]] * 2])
+    masks = ops.crop_mask(masks, boxes * ratios)   # boxes to prototype resolution
+    return masks.mul_(255).round_().byte()
+
+
+def make_detector(cfg: Any, fps: float, model: str | None = None) -> Detector:
+    """The detector for detector.model (or `model`, to override it): rf-detr-seg-* -> RF-DETR-Seg,
+    anything else -> an Ultralytics .pt such as yolo26n-seg.pt."""
+    name = model or str(cfg.detector.model)
+    if name.startswith("rf-detr"):
+        from core.detect.rf_detr import RFDETRDetector   # imported only when used: pulls in transformers
+        return RFDETRDetector(cfg, fps, model=name)
+    return UltralyticsDetector(cfg, fps, model=name)
+
+
+def openvino_device(device: str, auto_ok: bool = True) -> str:
+    """detector.device intel:npu | intel:gpu | intel:cpu -> the OpenVINO device that really runs the
+    model in this process. Same rule as Ultralytics: a device the process cannot see falls back to
+    AUTO (CPU if that is all there is). The NPU is invisible without the render group: start with
+    `sg render -c "..."`, or log out and in once after setup.sh added you to the group.
+    auto_ok=False: fall back to the GPU (else CPU) instead of AUTO, for models AUTO breaks."""
+    import openvino as ov
+    available = ov.Core().available_devices
+    wanted = device.partition(":")[2].upper()
+    if wanted and any(d == wanted or d.startswith(f"{wanted}.") for d in available):
+        return wanted
+    if auto_ok:
+        return "CPU" if available == ["CPU"] else "AUTO"
+    return "GPU" if any(d.startswith("GPU") for d in available) else "CPU"
+
+
+def runs_on(device: str, ov_device: str | None) -> str:
+    """Human-readable device for status lines, saying when the configured one was unavailable."""
+    if ov_device is None:
+        return device
+    wanted = device.partition(":")[2].upper()
+    if wanted and wanted != ov_device:
+        hint = " (no render group)" if wanted == "NPU" else ""
+        return f"{ov_device}: {wanted} unavailable{hint}"
+    return ov_device
+
+
+class TrackingDetector(Detector):
+    """What every model shares: Ultralytics' tracker, the confirm delay for new IDs, and the
+    Detections it returns. A model only implements _infer(): people in, boxes + soft masks out."""
+
+    AUTO_OK = True   # OpenVINO's AUTO device works for this model (see openvino_device)
+
     def __init__(self, cfg: Any, fps: float) -> None:
         """cfg: the loaded ConfigTable. fps: frames per second this detector will actually
         process (video fps when every frame is processed, expected_fps when live), used to
         turn timing.track_buffer_seconds into the tracker's frame count."""
         det = cfg.detector
         self.conf = float(det.conf)
-        self.imgsz = _imgsz(det.imgsz)
         self.device = str(det.device)
         self.half = bool(det.get("half", False))
-        self.int8 = bool(det.get("int8", False))
-        if self.int8 and self.device.startswith("intel:npu"):
-            # Measured: the INT8 export on the NPU found nobody in the far-away test section and
-            # lowered close-up scores; missed people would be shown uncensored. FP is exact there.
-            raise ValueError("detector.int8 with intel:npu loses detections; use int8: false on the NPU")
-        self.model = YOLO(str(_weights_for(det.model, self.device, self.imgsz, self.int8)), task="segment")
+        self.ov_device = openvino_device(self.device, self.AUTO_OK) if self.device.startswith("intel") else None
+        self.runs_on = runs_on(self.device, self.ov_device)   # for status lines: where the model really runs
+        self._infer_timing: dict[str, float] = {}
 
         tracker_cfg = yaml.safe_load((TRACKERS_DIR / f"{det.tracker}.yaml").read_text())
         tracker_cfg["track_buffer"] = max(1, round(float(cfg.timing.track_buffer_seconds) * fps))
@@ -88,7 +144,6 @@ class UltralyticsDetector(Detector):
         self._predict_conf = min(self.conf, float(tracker_cfg["track_low_thresh"]))
         self.confirm_seconds = float(cfg.timing.confirm_track_seconds)
         self._forget_after = float(cfg.timing.track_buffer_seconds) + 1.0
-        self._letterbox_shape: dict[tuple[int, int], tuple[int, int]] = {}
         self.reset()
 
     # -- Detector interface ---------------------------------------------------
@@ -99,14 +154,9 @@ class UltralyticsDetector(Detector):
 
     def detect(self, frame: Frame) -> Detections:
         t0 = time.perf_counter()
-        result = self.model.predict(
-            frame.image, classes=[PERSON], conf=self._predict_conf, imgsz=self.imgsz,
-            device=self.device, quantize=16 if self.half else None, verbose=False,
-            predictor=_LowResMaskPredictor,
-        )[0]
+        people, masks, geometry = self._infer(frame, self._predict_conf)
         t1 = time.perf_counter()
-        boxes = result.boxes.cpu().numpy()
-        frame_shape = frame.image.shape[:2]
+        boxes = Boxes(people, frame.image.shape[:2])
 
         # Tracker rows: x1, y1, x2, y2, track_id, score, cls, det_idx
         # (called on empty frames too: lost tracks must age so they expire on time)
@@ -125,25 +175,22 @@ class UltralyticsDetector(Detector):
             )
             for k, i in enumerate(keep)
         )
-
-        in_h, in_w = self._model_input_shape(frame)
-        if result.masks is not None and keep:
-            masks = (result.masks.data[keep] > 0).to("cpu").numpy().astype(np.uint8) * 255
-        else:
-            masks = np.zeros((0, in_h // 4, in_w // 4), dtype=np.uint8)  # prototype grid = input / 4
-
         dets = Detections(
-            frame_idx=frame.idx, ts=frame.ts, tracks=tracks, masks=np.ascontiguousarray(masks),
-            geometry=_mask_geometry(frame_shape, (in_h, in_w), masks.shape[1:]),
+            frame_idx=frame.idx, ts=frame.ts, tracks=tracks,
+            masks=np.ascontiguousarray(masks[keep]), geometry=geometry,
         )
         # Milliseconds spent in each step of the last call, for profiling.
-        sp = result.speed
         self.last_timing = {
-            "model_pre": sp["preprocess"], "model_infer": sp["inference"], "model_post": sp["postprocess"],
-            "ultralytics_other": 1000 * (t1 - t0) - sp["preprocess"] - sp["inference"] - sp["postprocess"],
+            **self._infer_timing,
             "tracker": 1000 * (t2 - t1), "to_contract": 1000 * (time.perf_counter() - t2),
         }
         return dets
+
+    def _infer(self, frame: Frame, conf: float) -> tuple[np.ndarray, np.ndarray, MaskGeometry]:
+        """Run the model: people scoring >= conf as (N, 6) float32 rows x1, y1, x2, y2 (frame
+        pixels), score, class; their soft masks (N, h, w) uint8 0..255, every one non-empty;
+        and the mask geometry. Sets self._infer_timing (ms per step) for profiling."""
+        raise NotImplementedError
 
     # -- internals ------------------------------------------------------------
 
@@ -154,6 +201,46 @@ class UltralyticsDetector(Detector):
         for tid in [t for t, (_, last) in self._seen.items() if now - last > self._forget_after]:
             del self._seen[tid]
         return {i: tid for i, tid in id_of.items() if now - self._seen[tid][0] >= self.confirm_seconds}
+
+
+class UltralyticsDetector(TrackingDetector):
+    """YOLO26-seg (or any Ultralytics segmentation .pt) through Ultralytics."""
+
+    def __init__(self, cfg: Any, fps: float, model: str | None = None) -> None:
+        super().__init__(cfg, fps)
+        det = cfg.detector
+        self.name = model or str(det.model)
+        self.imgsz = _imgsz(det.imgsz)
+        self.int8 = bool(det.get("int8", False))
+        if self.int8 and self.device.startswith("intel:npu"):
+            # Measured: the INT8 export on the NPU found nobody in the far-away test section and
+            # lowered close-up scores; missed people would be shown uncensored. FP is exact there.
+            raise ValueError("detector.int8 with intel:npu loses detections; use int8: false on the NPU")
+        self.model = YOLO(str(_weights_for(self.name, self.device, self.imgsz, self.int8)), task="segment")
+        self._letterbox_shape: dict[tuple[int, int], tuple[int, int]] = {}
+
+    def _infer(self, frame: Frame, conf: float) -> tuple[np.ndarray, np.ndarray, MaskGeometry]:
+        t0 = time.perf_counter()
+        result = self.model.predict(
+            frame.image, classes=[PERSON], conf=conf, imgsz=self.imgsz,
+            device=self.device, quantize=16 if self.half else None, verbose=False,
+            predictor=_LowResMaskPredictor,
+        )[0]
+        t1 = time.perf_counter()
+        people = result.boxes.data.cpu().numpy().astype(np.float32)
+        in_h, in_w = self._model_input_shape(frame)
+        if result.masks is not None:
+            masks = result.masks.data.to("cpu").numpy().astype(np.uint8)   # soft, 0..255
+        else:
+            masks = np.zeros((0, in_h // 4, in_w // 4), dtype=np.uint8)  # prototype grid = input / 4
+        geometry = _mask_geometry(frame.image.shape[:2], (in_h, in_w), masks.shape[1:])
+        sp = result.speed
+        self._infer_timing = {
+            "model_pre": sp["preprocess"], "model_infer": sp["inference"], "model_post": sp["postprocess"],
+            "ultralytics_other": 1000 * (t1 - t0) - sp["preprocess"] - sp["inference"] - sp["postprocess"],
+            "to_arrays": 1000 * (time.perf_counter() - t1),
+        }
+        return people, masks, geometry
 
     def _model_input_shape(self, frame: Frame) -> tuple[int, int]:
         """(h, w) of the letterboxed model input for this frame size (computed once per size)."""

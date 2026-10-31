@@ -22,7 +22,7 @@ import cv2
 
 from core.config_table import ConfigError, available_machines, load_config
 from core.contracts import CensoredFrame, Detections
-from core.detect.detector import UltralyticsDetector
+from core.detect.detector import make_detector
 from core.detect.masks import outlines_in_frame
 from core.video.io_check import draw_header
 from core.video.pacing import Pacer
@@ -74,7 +74,7 @@ def main(argv: list[str] | None = None) -> int:
     source = FileSource(args.clip, mode=args.mode)
     # The tracker counts processed frames: every frame offline, about expected_fps live.
     processed_fps = float(cfg.expected_fps) if source.is_live else source.fps
-    detector = UltralyticsDetector(cfg, fps=processed_fps)
+    detector = make_detector(cfg, fps=processed_fps)
     pacer = Pacer(processed_fps) if source.is_live and not args.unpaced else None
 
     sinks, display = [], None
@@ -88,7 +88,8 @@ def main(argv: list[str] | None = None) -> int:
         print("no output: timing only")
 
     d = cfg.detector
-    print(f"{args.clip.name} | {d.model} imgsz={d.imgsz} on {d.device} | tracker={d.tracker} "
+    model_input = getattr(detector, "imgsz", None) or getattr(detector, "resolution", "?")   # RF-DETR: fixed square
+    print(f"{args.clip.name} | {detector.name} input={model_input} on {detector.runs_on} | tracker={d.tracker} "
           f"track_buffer={detector.track_buffer_frames} frames ({cfg.timing.track_buffer_seconds} s at {processed_fps:.1f} fps)")
 
     ids_seen: set[int] = set()
