@@ -1,0 +1,5 @@
+# Test footage and derived data (README §4 repo layout, T04)
+clips/
+crops/
+# Family photos and face fingerprints
+whitelist/
