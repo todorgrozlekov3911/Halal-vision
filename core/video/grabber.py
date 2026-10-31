@@ -25,7 +25,7 @@ class Grabber:
         self.source = source
         self.received = 0        # frames read from the source
         self.dropped = 0         # frames overwritten before the main loop took them
-        self._cond = threading.Condition()
+        self._cond = threading.Condition() # python class for one thread to wait while specific condition is true -> waiting info from the main source thread
         self._frame: Frame | None = None    # the slot: newest undelivered frame
         self._eof = False                   # source ended, or close() called
         self._error: BaseException | None = None
