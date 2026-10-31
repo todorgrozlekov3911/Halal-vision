@@ -24,6 +24,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--mode", choices=MODES, default="offline")
     p.add_argument("--out", type=Path, help="also record to an H.264 file")
     p.add_argument("--no-display", action="store_true")
+    p.add_argument("--fullscreen", action="store_true",
+                   help="fullscreen display (the glasses output)")
+    p.add_argument("--debug-overlay", action="store_true",
+                   help="draw IDs, state, rule, fps and latency (dev window only; refused with --fullscreen)")
+    p.add_argument("--dump", type=Path,
+                   help="write per-frame decisions as JSON Lines, for evaluation")
     p.add_argument("--max-frames", type=int, default=0)
     p.add_argument("--max-seconds", type=float, default=0.0)
     args = p.parse_args(argv)

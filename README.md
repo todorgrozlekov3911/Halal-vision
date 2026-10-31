@@ -152,7 +152,7 @@ core/                      the one Python package; run with `python -m core.app 
   render/                  renderer.py, eyes.py, niqab.py                    (A)
   identity/                module.py, face.py, gender.py, whitelist.py,
                            policy.py                                         (B)
-system-configurations/     shared.yaml, intel.yaml, nvidia.yaml (+ trackers/ when tuned)
+system_configurations/     shared.yaml, intel.yaml, nvidia.yaml (+ trackers/ when tuned)
 requirements/              base.txt, intel.txt, nvidia.txt, lock-<machine>.txt
 setup.sh                   creates .venv for this machine
 whitelist/                 ← gitignored (family photos)

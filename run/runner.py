@@ -95,11 +95,13 @@ class RunStats:
     failsafe_frames: int = 0   # frames replaced by the fail-safe
     sink_failures: int = 0     # non-essential sinks dropped mid-run
     seconds: float = 0.0
+    avg_latency_ms: float | None = None   # capture-to-display average; None offline
     stop_reason: str = ""
 
     def __str__(self) -> str:
         fps = self.frames / self.seconds if self.seconds > 0 else 0.0
-        return (f"{self.frames} frames in {self.seconds:.1f} s ({fps:.1f} fps), "
+        latency = f", {self.avg_latency_ms:.0f} ms latency" if self.avg_latency_ms is not None else ""
+        return (f"{self.frames} frames in {self.seconds:.1f} s ({fps:.1f} fps{latency}), "
                 f"{self.failsafe_frames} fail-safe, {self.sink_failures} sinks lost "
                 f"| stopped: {self.stop_reason}")
 
@@ -109,7 +111,8 @@ class Runner:
 
     def __init__(self, *, frames: FrameSupply, detector: Detector, identity: IdentityModule,
                  renderer: Renderer, sinks: list[Sink], failsafe: FailSafe,
-                 pacer=None, fatal_sink_errors: bool = True, frame_timeout: float = 2.0,
+                 pacer=None, meters=None, overlay=None, dump=None,
+                 fatal_sink_errors: bool = True, frame_timeout: float = 2.0,
                  max_frames: int = 0, max_seconds: float = 0.0) -> None:
         self.frames = frames
         self.detector = detector
@@ -118,6 +121,9 @@ class Runner:
         self.sinks = list(sinks)
         self.failsafe = failsafe
         self.pacer = pacer
+        self.meters = meters       # LoopMeters: fps/latency, ticked once per shown frame
+        self.overlay = overlay     # DebugOverlay or None (dev window only)
+        self.dump = dump           # DecisionDump or None (per-frame JSONL for evaluation)
         self.fatal_sink_errors = fatal_sink_errors
         self.frame_timeout = frame_timeout
         self.max_frames = max_frames
@@ -147,10 +153,19 @@ class Runner:
                     now = time.perf_counter()
                     log.exception("frame path failed, showing fail-safe")
                     censored = self.failsafe.frame(now)
+                    detections, decisions = None, {}   # the dump/overlay see a fail-safe frame
                     stats.failsafe_frames += 1
                     if self.failsafe.exhausted(now):
                         raise PipelineFailure(
                             f"frame path failing for over {self.failsafe.exit_seconds} s") from None
+
+                # ---- instrumentation: sees only the censored frame and metadata ----
+                if self.meters:
+                    self.meters.tick(censored.ts, time.perf_counter(), real=detections is not None)
+                if self.dump:
+                    self._dump_write(censored, detections, decisions, stats)
+                if self.overlay:
+                    censored = self.overlay.apply(censored, detections, decisions, self.meters)
 
                 self._write(censored, stats)
 
@@ -161,8 +176,25 @@ class Runner:
             stats.stop_reason = "interrupted"
         finally:
             stats.seconds = time.perf_counter() - t_start
+            if self.meters:
+                stats.avg_latency_ms = self.meters.avg_latency_ms()
             self.close()
         return stats
+
+    def _dump_write(self, censored: CensoredFrame, detections, decisions, stats: RunStats) -> None:
+        """Same failure policy as sinks: offline aborts, live drops the dump and continues."""
+        try:
+            self.dump.write(censored, detections, decisions, self.meters)
+        except Exception as exc:
+            if self.fatal_sink_errors:
+                raise PipelineFailure(f"decision dump failed: {exc}") from exc
+            log.error("decision dump failed (%s); dump dropped, run continues", exc)
+            try:
+                self.dump.close()
+            except Exception:
+                pass
+            self.dump = None
+            stats.sink_failures += 1
 
     def _write(self, censored: CensoredFrame, stats: RunStats) -> None:
         for sink in list(self.sinks):
@@ -196,7 +228,10 @@ class Runner:
         if self._closed:
             return
         self._closed = True
-        for name, closer in [("frames", self.frames.close), ("identity", self.identity.close)]:
+        closers = [("frames", self.frames.close), ("identity", self.identity.close)]
+        if self.dump:
+            closers.append(("dump", self.dump.close))
+        for name, closer in closers:
             try:
                 closer()
             except Exception:

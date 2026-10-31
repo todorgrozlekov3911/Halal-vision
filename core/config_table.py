@@ -1,7 +1,7 @@
 """Config system (T03).
 
 Layers, later wins:
-    system-configurations/shared.yaml  <  <machine>.yaml  <  --set key.path=value
+    system_configurations/shared.yaml  <  <machine>.yaml  <  --set key.path=value
 
 load_config() returns a ConfigTable: a read-only, dict-like object holding the
 merged result. Components read from it; nothing writes to it after startup.
@@ -15,7 +15,7 @@ from typing import Any, Iterator
 
 import yaml
 
-CONFIG_DIR = Path(__file__).resolve().parents[1] / "system-configurations"
+CONFIG_DIR = Path(__file__).resolve().parents[1] / "system_configurations"
 SHARED = "shared"
 
 

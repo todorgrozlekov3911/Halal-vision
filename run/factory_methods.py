@@ -21,7 +21,11 @@ from typing import Callable
 from core.config_table import CONFIG_DIR, ConfigError, ConfigTable
 from core.contracts import ConcealAllIdentity, IdentityModule, Renderer, Sink, Source
 from core.detect.detector import UltralyticsDetector
+from core.eval.dump import DecisionDump
+from core.render.overlay import DebugOverlay
+from core.render.renderer import StyleRenderer
 from core.video.grabber import Grabber
+from core.video.meters import LoopMeters
 from core.video.pacing import Pacer
 from core.video.sinks import DisplaySink, FileSink
 from core.video.sources import FileSource
@@ -83,7 +87,8 @@ def register_sink(name: str):
 def _display_sink(ctx: BuildContext) -> Sink | None:
     if ctx.args.no_display:
         return None
-    sink = DisplaySink(window=f"halal-vision - {Path(ctx.args.clip).name}")
+    sink = DisplaySink(window=f"halal-vision - {Path(ctx.args.clip).name}",
+                       fullscreen=ctx.args.fullscreen)
     sink.essential = True      # live: losing the display aborts the run
     return sink
 
@@ -139,17 +144,26 @@ def build_identity(ctx: BuildContext) -> IdentityModule:
 
 
 def build_renderer(ctx: BuildContext) -> Renderer:
-    # The real renderer (T10/T11) is being built in parallel. When it lands,
-    # import and construct it here; nothing else in this file changes.
-    raise ConfigError("renderer not implemented yet (T10/T11 in progress); "
-                      "the Runner is currently exercised through tests only")
+    return StyleRenderer(ctx.cfg)
+
+
+def build_meters(ctx: BuildContext) -> LoopMeters:
+    return LoopMeters(live=ctx.live)     # always on: a subtraction per frame, and T14 needs it
+
+
+def build_overlay(ctx: BuildContext) -> DebugOverlay | None:
+    return DebugOverlay() if ctx.args.debug_overlay else None
+
+
+def build_dump(ctx: BuildContext) -> DecisionDump | None:
+    return DecisionDump(ctx.args.dump) if ctx.args.dump else None
 
 
 def build_failsafe(ctx: BuildContext) -> FailSafe:
     fs = ctx.cfg["fail_state"]
     image = fs.get("pipeline_break_image")
     if image:
-        # relative paths are relative to system-configurations/, not the CWD
+        # relative paths are relative to system_configurations/, not the CWD
         path = Path(image) if Path(image).is_absolute() else CONFIG_DIR / image
         if path.is_file():
             image = str(path)
@@ -164,16 +178,37 @@ def build_failsafe(ctx: BuildContext) -> FailSafe:
 
 # -- validation + aggregation --------------------------------------------------
 
+def _openvino_sees(wanted: str, available: list[str]) -> bool:
+    """OpenVINO lists devices as NPU / GPU / GPU.0 / CPU; intel:gpu matches GPU and GPU.0."""
+    return any(d == wanted or d.startswith(f"{wanted}.") for d in available)
+
+
 def _validate(ctx: BuildContext, sinks: list[Sink]) -> None:
     """Cross-cutting checks: raise now, not at frame 1."""
     if not sinks:
         raise ConfigError("nothing to output: drop --no-display or add --out")
+    if ctx.args.debug_overlay and ctx.args.fullscreen:
+        raise ConfigError("the debug overlay is refused on the glasses output (fullscreen "
+                          "display): internal state never reaches the glasses (README §6.4)")
     device = str(ctx.cfg.detector.device)
     if device.startswith("cuda"):
         import torch
         if not torch.cuda.is_available():
             raise ConfigError(f"config wants detector.device={device} but CUDA is not "
                               "available on this machine (driver? wrong --machine?)")
+    elif device.startswith("intel"):
+        # The device is a benchmark/config decision: a device this process cannot see is a
+        # configuration error, never a silent fall-back to something slower.
+        import openvino
+        wanted = device.partition(":")[2].upper()
+        available = list(openvino.Core().available_devices)
+        if wanted and not _openvino_sees(wanted, available):
+            hint = ("NPU driver loaded (/dev/accel0)? user in the render group?"
+                    if wanted == "NPU" else "driver?")
+            raise ConfigError(
+                f"config wants detector.device={device} but OpenVINO sees only {available} "
+                f"({hint}); pick an available device (e.g. --set detector.device=intel:gpu) "
+                f"or fix the driver — this does not fall back silently")
 
 
 def build_runner(cfg: ConfigTable, args: argparse.Namespace) -> Runner:
@@ -190,6 +225,9 @@ def build_runner(cfg: ConfigTable, args: argparse.Namespace) -> Runner:
             sinks=sinks,
             failsafe=build_failsafe(ctx),
             pacer=build_pacer(ctx),
+            meters=build_meters(ctx),
+            overlay=build_overlay(ctx),
+            dump=build_dump(ctx),
             fatal_sink_errors=not ctx.live,
             max_frames=args.max_frames,
             max_seconds=args.max_seconds,

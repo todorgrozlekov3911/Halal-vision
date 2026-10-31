@@ -43,7 +43,7 @@ from core.contracts import MASK_CUT, Detections, Detector, Frame, MaskGeometry, 
 
 REPO = Path(__file__).resolve().parents[2]
 MODELS_DIR = REPO / "models"
-TRACKERS_DIR = REPO / "system-configurations" / "trackers"
+TRACKERS_DIR = REPO / "system_configurations" / "trackers"
 PERSON = 0  # COCO class id
 
 

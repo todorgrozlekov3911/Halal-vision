@@ -42,6 +42,6 @@ identity:
   min_face_px: 32           # smaller faces give no evidence 
 
 fail_state:
-  pipeline_break_image: assets/failsafe.jpeg   # relative to system-configurations/
+  pipeline_break_image: assets/failsafe.jpeg   # relative to system_configurations/
   hold_before_break_image: 0.5
   abort_after: 5.0
