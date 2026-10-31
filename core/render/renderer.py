@@ -95,6 +95,8 @@ class StyleRenderer(Renderer):
         self._memory: dict[int, _Memory] = {}   # key: track ID, or negative for detections without one
         self._next_key = 0
         self.last_timing: dict[str, float] = {}
+        self.keep_cover = False                  # evaluation: keep each frame's cover in last_cover
+        self.last_cover: np.ndarray | None = None   # (H, W) uint8 alpha, 255 = fully covered
         self.set_default_style(str(cfg.policy.conceal_style))
 
     def set_default_style(self, style: str) -> None:
@@ -112,6 +114,8 @@ class StyleRenderer(Renderer):
         people = self._people(frame.ts, detections, decisions)
         grown = [self.masks.grow_person(p.small, p.bbox, geometry) for p in people]
         t1 = time.perf_counter()
+        if self.keep_cover:
+            self.last_cover = np.zeros(frame.image.shape[:2], np.uint8)
 
         for style in {p.style for p in people}:        # one combined cover and one paint per style
             union = None
@@ -122,6 +126,8 @@ class StyleRenderer(Renderer):
             if cover is not None:
                 x1, y1, x2, y2 = cover.region
                 _paint(out[y1:y2, x1:x2], self._painters[style](frame.image, cover.region), cover.mask)
+                if self.keep_cover:
+                    np.maximum(self.last_cover[y1:y2, x1:x2], cover.mask, out=self.last_cover[y1:y2, x1:x2])
         t2 = time.perf_counter()
 
         thickness = self.outline_fraction * frame.image.shape[0]
