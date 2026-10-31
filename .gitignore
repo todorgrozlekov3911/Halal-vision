@@ -20,3 +20,9 @@ venv/
 .vscode/
 .idea/
 .DS_Store
+
+# Model weights and exports (downloaded / generated, not source)
+*.pt
+*.onnx
+*.engine
+*_openvino_model/

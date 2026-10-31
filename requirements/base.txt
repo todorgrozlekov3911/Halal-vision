@@ -8,7 +8,7 @@ numpy==2.5.4; python_version >= "3.13"
 numpy==1.26.4; python_version < "3.13"
 ml_dtypes>=0.6.0; python_version >= "3.13"
 opencv-python==4.10.0.84
-ultralytics==8.3.49      # YOLO-seg + ByteTrack/BoT-SORT (decision #32)
+ultralytics==8.4.194     # YOLO26-seg + ByteTrack/BoT-SORT (decision #32); 8.3.x has no YOLO26
 insightface==0.7.3       # face analysis: buffalo_l / buffalo_s (T16)
 lapx==0.5.11             # required by ultralytics trackers
 pyyaml==6.0.2            # shared + per-machine config (T03)
