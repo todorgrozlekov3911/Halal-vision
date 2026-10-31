@@ -21,13 +21,19 @@ _QUIT_KEYS = {ord("q"), 27}  # q, Esc
 
 
 class DisplaySink(Sink):
-    """Shows frames in a window. Sets ``quit_requested`` on q / Esc / window closed."""
+    """Shows frames in a window. Sets ``quit_requested`` on q / Esc.
+
+    Closing the window is deliberately not a quit signal: OpenCV reports a hidden
+    window (minimized, other workspace) the same as a closed one, which stopped
+    runs early. A closed window simply reappears with the next frame.
+    """
 
     def __init__(self, window: str = "halal-vision", fullscreen: bool = False, max_width: int = 1280) -> None:
         self.window = window
         self.fullscreen = fullscreen
         self.max_width = max_width
         self.quit_requested = False
+        self.quit_reason = ""
         self._opened = False
 
     def _open(self, height: int, width: int) -> None:
@@ -43,8 +49,8 @@ class DisplaySink(Sink):
             self._open(*frame.image.shape[:2])
         cv2.imshow(self.window, frame.image)
         key = cv2.waitKey(1) & 0xFF   # also lets the window repaint
-        if key in _QUIT_KEYS or cv2.getWindowProperty(self.window, cv2.WND_PROP_VISIBLE) < 1:
-            self.quit_requested = True
+        if key in _QUIT_KEYS:
+            self.quit_requested, self.quit_reason = True, f"key {'Esc' if key == 27 else chr(key)} pressed"
 
     def close(self) -> None:
         if self._opened:

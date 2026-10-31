@@ -154,6 +154,13 @@ def main(argv: list[str] | None = None) -> int:
             sink.close()
 
     took = time.perf_counter() - t_start
+    if display and display.quit_requested:
+        stop = f"window: {display.quit_reason}"
+    elif source.end_reason:
+        stop = f"source: {source.end_reason}"
+    else:
+        stop = "frame/time limit or Ctrl+C"
+    print(f"stopped because: {stop}")
     paced = f", paced at {processed_fps:.0f} fps, {pacer.late} frames over budget" if pacer else ""
     print(f"{n} frames in {took:.1f} s ({n / took:.1f} fps), skipped {source.skipped}{paced}")
     if life:

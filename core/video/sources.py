@@ -43,6 +43,7 @@ class FileSource(Source):
         )
         self.frame_count = int(self._cap.get(cv2.CAP_PROP_FRAME_COUNT))  # container estimate
         self.skipped = 0          # realtime only: frames dropped because the caller was slow
+        self.end_reason = ""      # why read() returned None
         self._next_idx = 0        # index of the next frame in the file
         self._t0: float | None = None  # realtime: clock time of frame 0
 
@@ -73,6 +74,7 @@ class FileSource(Source):
     def _read_next(self, ts: float) -> Frame | None:
         ok, image = self._cap.read()   # OpenCV allocates a new array per call (rule 3)
         if not ok:
+            self.end_reason = f"read() failed at frame {self._next_idx} of ~{self.frame_count}"
             return None
         frame = Frame(image=image, ts=ts, idx=self._next_idx, source_id=self.source_id)
         self._next_idx += 1
@@ -91,6 +93,7 @@ class FileSource(Source):
             # Caller is behind: skip the frames it missed (grab() decodes less than read()).
             while self._next_idx < due:
                 if not self._cap.grab():
+                    self.end_reason = f"grab() failed at frame {self._next_idx} of ~{self.frame_count}"
                     return None
                 self._next_idx += 1
                 self.skipped += 1
