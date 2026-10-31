@@ -29,3 +29,9 @@ venv/
 
 # Local outputs (exports, recordings)
 out/
+
+# Downloaded / exported model files
+models/
+
+# Intel GPU shader-compiler diagnostics, written to the working dir by OpenVINO
+kernel.errors.txt

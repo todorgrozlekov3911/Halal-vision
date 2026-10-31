@@ -22,18 +22,22 @@ from core.video.sinks import DisplaySink, FileSink
 from core.video.sources import MODES, FileSource
 
 
-def annotate(frame: Frame, lines: list[str]) -> CensoredFrame:
-    img = frame.image.copy()  # Frame.image is read-only; draw on a copy
+def draw_header(img, title: str, lines: list[str]) -> None:
+    """Red title bar plus white-on-black text lines, scaled to the frame height. Draws in place."""
     h, w = img.shape[:2]
     s = h / 1080
     cv2.rectangle(img, (0, 0), (w, int(60 * s)), (0, 0, 200), -1)
-    cv2.putText(img, "I/O CHECK - NOT CENSORED", (int(20 * s), int(44 * s)),
+    cv2.putText(img, title, (int(20 * s), int(44 * s)),
                 cv2.FONT_HERSHEY_SIMPLEX, 1.4 * s, (255, 255, 255), max(1, int(3 * s)), cv2.LINE_AA)
     for i, text in enumerate(lines):
-        y = int((110 + 45 * i) * s)
-        org = (int(20 * s), y)
+        org = (int(20 * s), int((110 + 45 * i) * s))
         cv2.putText(img, text, org, cv2.FONT_HERSHEY_SIMPLEX, 1.1 * s, (0, 0, 0), max(1, int(6 * s)), cv2.LINE_AA)
         cv2.putText(img, text, org, cv2.FONT_HERSHEY_SIMPLEX, 1.1 * s, (255, 255, 255), max(1, int(2 * s)), cv2.LINE_AA)
+
+
+def annotate(frame: Frame, lines: list[str]) -> CensoredFrame:
+    img = frame.image.copy()  # Frame.image is read-only; draw on a copy
+    draw_header(img, "I/O CHECK - NOT CENSORED", lines)
     return CensoredFrame(image=img, ts=frame.ts, idx=frame.idx)
 
 
