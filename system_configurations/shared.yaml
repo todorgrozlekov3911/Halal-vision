@@ -46,6 +46,10 @@ identity:
   face_det_size: 320        # face detector input (square); faces are looked for in person boxes
   face_det_thresh: 0.5      # face detector confidence to report a face
   face_threads: 2           # CPU threads per face model, leaving cores for the detector
+  assign_own_min: 0.6       # T17: a face belongs to a person when at least this share of it lies on their mask...
+  assign_other_max: 0.3     # ...at most this share on anyone else's (else ambiguous: no evidence)
+  assign_grow_cells: 1      # person masks grown by this many mask cells before the test (small faces, edges)
+  head_zone: 0.35           # the face centre must be in this top share of the person's box (not a carried child)
 
 fail_state:
   pipeline_break_image: assets/failsafe.jpeg   # relative to system_configurations/
