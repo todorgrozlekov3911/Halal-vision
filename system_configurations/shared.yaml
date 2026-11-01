@@ -7,6 +7,9 @@ detector:
   tracker: botsort          # tuned on teacher labels, eval/sweep.py 2026-11-01: fewer ID switches than bytetrack, same cover | bytetrack = fast | botsort_reid = appearance ReID, slower
   conf: 0.1                 # tuned on teacher labels, eval/sweep.py 2026-11-01 (was 0.25): weak detections are covered too; misses cost more than false covers
   imgsz: [512, 896]         # [height, width], 16:9 like the video; tuned on teacher labels, eval/sweep.py 2026-11-01: missed people 2.0% -> 0.6% vs 384x640 (18.7 ms on the Intel NPU)
+  merge_inside: 0.7         # an ID-less detection with this share of its mask on a kept person's mask is a duplicate
+                            # of them (YOLO26 has no NMS): its mask joins theirs. Masks, not boxes: someone standing
+                            # behind a person is never folded into them. 0 = off
 
 timing:
   mask_hold_seconds: 0.3          # keep drawing a person the detector missed this long, at their last speed (tuned on teacher labels, eval/sweep.py 2026-11-01, was 0.5)

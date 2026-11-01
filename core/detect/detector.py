@@ -143,6 +143,7 @@ class TrackingDetector(Detector):
         self._tracker_cls = TRACKER_MAP[tracker_cfg["tracker_type"]]
         self._predict_conf = min(self.conf, float(tracker_cfg["track_low_thresh"]))
         self.confirm_seconds = float(cfg.timing.confirm_track_seconds)
+        self.merge_inside = float(det.get("merge_inside", 0.0))   # 0 = off; see merge_duplicates
         self._forget_after = float(cfg.timing.track_buffer_seconds) + 1.0
         self.reset()
 
@@ -166,6 +167,7 @@ class TrackingDetector(Detector):
         t2 = time.perf_counter()
 
         keep = [i for i in range(len(boxes)) if i in id_of or boxes.conf[i] >= self.conf]
+        keep, masks = merge_duplicates(boxes.conf, id_of, masks, keep, self.merge_inside)
         tracks = tuple(
             Track(
                 track_id=id_of.get(i),
@@ -201,6 +203,46 @@ class TrackingDetector(Detector):
         for tid in [t for t, (_, last) in self._seen.items() if now - last > self._forget_after]:
             del self._seen[tid]
         return {i: tid for i, tid in id_of.items() if now - self._seen[tid][0] >= self.confirm_seconds}
+
+
+def merge_duplicates(scores: np.ndarray, id_of: dict[int, int], masks: np.ndarray, keep: list[int],
+                     inside: float) -> tuple[list[int], np.ndarray]:
+    """Fold ID-less duplicates into the person they lie on.
+
+    YOLO26 has no NMS (end-to-end head), so a person sometimes comes with a second, weaker detection
+    of nearly the same shape. The tracker gives the person's ID to one of them; the other comes back
+    ID-less and would be drawn as a second person. Here an ID-less detection is dropped when at
+    least `inside` of its mask lies on the mask of an already kept detection (tracked first, then by
+    score), and its mask is added to that one's, so nothing it covered is uncovered.
+
+    The test is on masks, not boxes, on purpose: a different person standing behind someone has a
+    box largely inside theirs, but is visible exactly where the front person is not, so their mask
+    does not lie on the front person's and they are never folded in (if the front person is later
+    passed, e.g. whitelisted, the person behind must stay concealed). Tracked detections are never
+    folded away, and the tracker still sees every detection (this runs after it).
+    Returns the new keep list and the masks array (a copy if anything was merged)."""
+    if inside <= 0 or len(keep) < 2:
+        return keep, masks
+    order = sorted(keep, key=lambda i: (i not in id_of, -float(scores[i])))   # tracked first, then by score
+    kept: list[int] = []
+    merged = None
+    for i in order:
+        target = None
+        if i not in id_of:
+            own = masks[i] >= MASK_CUT
+            n = int(own.sum())
+            for j in kept:
+                if n and int((own & (masks[j] >= MASK_CUT // 2)).sum()) >= inside * n:   # half cut: edges differ a little
+                    target = j
+                    break
+        if target is None:
+            kept.append(i)
+            continue
+        if merged is None:
+            merged = masks.copy()
+        np.maximum(merged[target], merged[i], out=merged[target])
+    kept.sort()                                           # keep the model's order
+    return kept, (masks if merged is None else merged)
 
 
 class UltralyticsDetector(TrackingDetector):

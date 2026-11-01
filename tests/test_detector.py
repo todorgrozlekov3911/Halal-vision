@@ -15,7 +15,8 @@ import pytest
 
 from core.config_table import load_config
 from core.contracts import MASK_CUT, Frame
-from core.detect.detector import UltralyticsDetector, _imgsz, _mask_geometry, openvino_device, runs_on
+from core.detect.detector import (UltralyticsDetector, _imgsz, _mask_geometry, merge_duplicates, openvino_device,
+                                  runs_on)
 from core.detect.masks import outlines_in_frame
 
 CLIP = Path(__file__).resolve().parents[1] / "clips" / "berlin_people_crossing.mp4"
@@ -165,3 +166,45 @@ def test_runs_on_says_when_the_npu_is_missing():
     assert runs_on("intel:npu", "AUTO") == "AUTO: NPU unavailable (no render group)"
     assert runs_on("intel:npu", "GPU") == "GPU: NPU unavailable (no render group)"
     assert runs_on("cuda:0", None) == "cuda:0"
+
+
+# -- duplicate merging (YOLO26 has no NMS) -----------------------------------------------
+
+def _masks(*rects):
+    """One 20x40 mask per (x1, x2) column range, rows 2..18, fully certain."""
+    out = np.zeros((len(rects), 20, 40), np.uint8)
+    for k, (x1, x2) in enumerate(rects):
+        out[k, 2:18, x1:x2] = 255
+    return out
+
+
+def test_an_id_less_copy_is_folded_into_the_tracked_person_and_its_mask_kept():
+    masks = _masks((10, 20), (11, 22))                 # the copy sticks out by two columns
+    keep, merged = merge_duplicates(np.array([0.9, 0.2]), {0: 5}, masks, [0, 1], inside=0.7)
+    assert keep == [0]
+    assert (merged[0] >= MASK_CUT).sum() == (np.maximum(masks[0], masks[1]) >= MASK_CUT).sum()
+    assert masks[0, 5, 21] == 0                         # the input is not changed
+
+
+def test_someone_behind_a_person_is_never_folded_in():
+    masks = _masks((10, 20), (20, 26))                 # visible next to the front person, not on them
+    keep, _ = merge_duplicates(np.array([0.9, 0.3]), {0: 5}, masks, [0, 1], inside=0.7)
+    assert keep == [0, 1]
+
+
+def test_tracked_people_are_never_folded_away():
+    masks = _masks((10, 20), (10, 20))
+    keep, _ = merge_duplicates(np.array([0.9, 0.8]), {0: 5, 1: 6}, masks, [0, 1], inside=0.7)
+    assert keep == [0, 1]
+
+
+def test_without_ids_the_stronger_detection_stays():
+    masks = _masks((10, 20), (10, 20))
+    keep, _ = merge_duplicates(np.array([0.3, 0.6]), {}, masks, [0, 1], inside=0.7)
+    assert keep == [1]
+
+
+def test_merging_off():
+    masks = _masks((10, 20), (10, 20))
+    keep, out = merge_duplicates(np.array([0.9, 0.2]), {0: 5}, masks, [0, 1], inside=0.0)
+    assert keep == [0, 1] and out is masks

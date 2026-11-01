@@ -163,6 +163,7 @@ class Score:
     leak_frames: int = 0
     over_px: float = 0.0          # sum over frames of the over-covered share of the frame
     with_id: int = 0
+    duplicated: int = 0           # person-frames the pipeline shows as two or more people
     id_switches: int = 0
     track_minutes: float = 0.0
     seconds: float = 0.0          # wall time of the replay
@@ -170,7 +171,7 @@ class Score:
 
     def add(self, other: Score) -> None:
         for k in ("person_frames", "missed", "partial", "gt_px", "leak_px", "frames", "leak_frames",
-                  "over_px", "with_id", "id_switches", "track_minutes", "seconds"):
+                  "over_px", "with_id", "duplicated", "id_switches", "track_minutes", "seconds"):
             setattr(self, k, getattr(self, k) + getattr(other, k))
         self.worst += other.worst
 
@@ -184,6 +185,7 @@ class Score:
             "over_%": 100 * self.over_px / max(1, self.frames),
             "id_switch/min": self.id_switches / max(1e-9, self.track_minutes),
             "id_cover_%": 100 * self.with_id / pf,
+            "dup_%": 100 * self.duplicated / pf,
             "person_frames": self.person_frames,
         }
 
@@ -312,8 +314,27 @@ def _score_frame(s: Score, truth: _LabelFrame, dets: Detections, cover: np.ndarr
         if p.track_id is not None:
             live_ids.setdefault(p.track_id, []).append((truth.idx, live))
     s.leak_frames += frame_missed
+    s.duplicated += _duplicated(truth.people, dets)
     near = np.unpackbits(truth.near, count=covered.size).reshape(covered.shape).astype(bool)
     s.over_px += float((covered & ~near).mean())
+
+
+def _duplicated(people: list[_Person], dets: Detections) -> int:
+    """Teacher people with two or more live detections: each detection belongs to the person whose
+    box holds most of it (at least 70%)."""
+    owners: dict[int, int] = {}
+    for t in dets.tracks:
+        b = t.bbox
+        area = max(1e-9, float((b[2] - b[0]) * (b[3] - b[1])))
+        best, best_share = None, 0.7
+        for k, p in enumerate(people):
+            iw = max(0.0, min(b[2], p.box[2]) - max(b[0], p.box[0]))
+            ih = max(0.0, min(b[3], p.box[3]) - max(b[1], p.box[1]))
+            if iw * ih / area >= best_share:
+                best, best_share = k, iw * ih / area
+        if best is not None:
+            owners[best] = owners.get(best, 0) + 1
+    return sum(n > 1 for n in owners.values())
 
 
 def _live_id(box: np.ndarray, dets: Detections) -> int | None:
