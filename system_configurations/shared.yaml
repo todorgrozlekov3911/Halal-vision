@@ -4,16 +4,16 @@
 
 detector:
   model: yolo26n-seg.pt
-  tracker: bytetrack        # bytetrack = fast | botsort_reid = accurate (appearance ReID, slower) | botsort
-  conf: 0.25
-  imgsz: 640                # per-machine files override this
+  tracker: botsort          # tuned on teacher labels, eval/sweep.py 2026-11-01: fewer ID switches than bytetrack, same cover | bytetrack = fast | botsort_reid = appearance ReID, slower
+  conf: 0.1                 # tuned on teacher labels, eval/sweep.py 2026-11-01 (was 0.25): weak detections are covered too; misses cost more than false covers
+  imgsz: [512, 896]         # [height, width], 16:9 like the video; tuned on teacher labels, eval/sweep.py 2026-11-01: missed people 2.0% -> 0.6% vs 384x640 (18.7 ms on the Intel NPU)
 
 timing:
-  mask_hold_seconds: 0.5          # keep drawing a lost subject's mask # tiny interval to continue rendering hiqab for instance if a subject is missing # this will by pass remvoing the asset for events like camera blures for few frame
-  mask_smooth_seconds: 0.15       # masks are a running average over about this long, so shapes change gradually, not per frame
+  mask_hold_seconds: 0.3          # keep drawing a person the detector missed this long, at their last speed (tuned on teacher labels, eval/sweep.py 2026-11-01, was 0.5)
+  mask_smooth_seconds: 0.0        # running average of mask shapes over this long; 0 = masks follow people directly (tuned on teacher labels, eval/sweep.py 2026-11-01, was 0.15)
   gap_reverify_seconds: 0.15      # unseen longer -> back to concealed until re-verified # any time interval report for new id bigger than this gap is re-checked for existing confirmation / metadata on the face
   confirm_track_seconds: 0.1      # a new track stays ID-less (concealed, not identified) this long, so one-frame flickers never get an ID
-  track_buffer_seconds: 1.5       # tracker keeps a lost from sight ID <-> short term cached metadata "memory" , after that interval we recompute #NOTE: souly rellying on track library to get that this is an existing ID
+  track_buffer_seconds: 2.5       # tracker keeps a lost person's ID this long; identity forgets them after it too (tuned on teacher labels, eval/sweep.py 2026-11-01, was 1.5)
   recheck_whitelist_seconds: 1.0
   recheck_gender_seconds: 2.0
   retry_unsure_seconds: 0.3       # time interval for retrying to gain metadata for identity with terrible tresholds -> for instance a face below <min_face_px>
@@ -25,13 +25,13 @@ policy:
   overlap_iou: 0.1          # box overlap that counts as a crossing
 
 render:
-  mask_grow_fraction: 0.04       # grow each covered person's mask by this share of their box height (hair, loose edges)
+  mask_grow_fraction: 0.06       # grow each covered person's mask by this share of their box height (hair, loose edges; tuned on teacher labels, eval/sweep.py 2026-11-01, was 0.04)
   mask_grow_min_fraction: 0.01   # ...but by at least this share of the frame height (far, small people)
   edge_fade: 64                  # soft outer edge: mask certainty levels just below the cut (128) that fade out; 0 = hard edge
   niqab_color: [26, 22, 20]      # niqab: BGR, near-black with a faint blue
   outline_fraction: 0.0025       # outline around each covered person, as a share of the frame height (~3 px at 1080p); 0 = none
   outline_color: [110, 110, 110] # BGR
-  min_person_height: 0.12        # cover people at least this share of the frame height (~130 px at 1080p): far people and most
+  min_person_height: 0.11        # cover people at least this share of the frame height (~120 px at 1080p; tuned on teacher labels, eval/sweep.py 2026-11-01, was 0.12): far people and most
                                  # false detections are small. LEAK TRADE-OFF (decided for now): people further away are shown
   blur_rows: 36                  # blur: shrink the frame to this many rows, then enlarge; fewer = stronger
   pixelate_rows: 32              # pixelate: blocks per frame height; fewer = bigger blocks

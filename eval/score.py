@@ -39,6 +39,7 @@ import numpy as np
 from core.config_table import ConfigError, available_machines, load_config
 from core.contracts import Detections, Frame, MaskGeometry
 from core.detect.detector import TrackingDetector, UltralyticsDetector, _imgsz
+from ultralytics.trackers.track import TRACKER_MAP
 from core.render.renderer import StyleRenderer
 
 REPO = Path(__file__).resolve().parents[1]
@@ -62,6 +63,8 @@ class ModelCache:
     rows: dict[int, np.ndarray]
     masks: dict[int, np.ndarray]
     geometry: MaskGeometry
+    infer_ms: float = 0.0         # median model time per frame where the cache was built
+    device: str = ""
 
     @staticmethod
     def path(cfg: Any, clip: Path, stride: int) -> Path:
@@ -83,7 +86,9 @@ class ModelCache:
         masks = {int(i): all_masks[a:b] for i, a, b in zip(idx, offsets[:-1], offsets[1:])}
         g = z["geometry"]
         return cls(rows, masks, MaskGeometry(scale=float(g[0]), pad_x=float(g[1]), pad_y=float(g[2]),
-                                             frame_shape=(int(g[3]), int(g[4]))))
+                                             frame_shape=(int(g[3]), int(g[4]))),
+                   float(np.median(z["infer_ms"])) if "infer_ms" in z else 0.0,
+                   str(z["device"]) if "device" in z else "")
 
     @staticmethod
     def _build(cfg: Any, clip: Path, stride: int, path: Path) -> None:
@@ -91,7 +96,7 @@ class ModelCache:
         cap = cv2.VideoCapture(str(clip))
         fps = cap.get(cv2.CAP_PROP_FPS)
         det = UltralyticsDetector(cfg, fps / stride)
-        idx_list, rows, masks, geometry = [], [], [], None
+        idx_list, rows, masks, geometry, infer_ms = [], [], [], None, []
         idx = -1
         while cap.grab():
             idx += 1
@@ -102,6 +107,7 @@ class ModelCache:
                 break
             people, m, geometry = det._infer(Frame(img, idx / fps, idx, clip.stem), CONF_FLOOR)
             idx_list.append(idx); rows.append(people); masks.append(m)
+            infer_ms.append(det._infer_timing["model_infer"])
         cap.release()
         offsets = np.cumsum([0] + [len(r) for r in rows])
         mask_shape = masks[0].shape[1:]
@@ -110,7 +116,8 @@ class ModelCache:
             path, idx=np.array(idx_list), offsets=offsets,
             rows=np.concatenate(rows) if offsets[-1] else np.zeros((0, 6), np.float32),
             masks=np.concatenate(masks) if offsets[-1] else np.zeros((0, *mask_shape), np.uint8),
-            geometry=np.array([geometry.scale, geometry.pad_x, geometry.pad_y, *geometry.frame_shape], np.float64))
+            geometry=np.array([geometry.scale, geometry.pad_x, geometry.pad_y, *geometry.frame_shape], np.float64),
+            infer_ms=np.array(infer_ms[5:] or infer_ms, np.float32), device=np.array(det.runs_on))   # first frames warm up
 
 
 class ReplayDetector(TrackingDetector):
@@ -181,65 +188,116 @@ class Score:
         }
 
 
-def score_clip(cfg: Any, clip: Path, stride: int, eval_min_height: float) -> Score:
+@dataclass
+class _Person:
+    """One scored teacher person on one label frame: their visible pixels, cut to their box."""
+    track_id: int | None
+    box: np.ndarray
+    y1: int
+    x1: int
+    pixels: np.ndarray        # bool, visible pixels inside (y1, x1) + shape
+
+
+@dataclass
+class _LabelFrame:
+    idx: int
+    people: list[_Person]
+    near: np.ndarray          # packed bits: within OVER_MARGIN of any teacher person (any size, ignore too)
+
+
+_TRUTH: dict[tuple, dict[int, _LabelFrame]] = {}
+
+
+def load_truth(clip_stem: str, eval_min_height: float) -> dict[int, _LabelFrame]:
+    """The teacher labels of one clip, prepared once per process (masks read, people cut out)."""
+    key = (str(LABELS), clip_stem, eval_min_height)
+    if key in _TRUTH:
+        return _TRUTH[key]
+    labels = load_labels(clip_stem)
+    h = labels["height"]
+    margin = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * round(OVER_MARGIN * h) + 1,) * 2)
+    out = {}
+    for f in labels["frames"]:
+        if not f["label"]:
+            continue
+        inst = cv2.imread(str(LABELS / clip_stem / "masks" / f"{f['idx']:06d}.png"), cv2.IMREAD_UNCHANGED)
+        people = []
+        for p in f["people"]:
+            if p["ignore"] or "id" not in p or p["visible_area"] < MIN_VISIBLE_PX:
+                continue
+            if (p["box"][3] - p["box"][1]) / h < eval_min_height:
+                continue
+            ys, xs = np.nonzero(inst == p["id"])
+            y1, x1 = int(ys.min()), int(xs.min())
+            pixels = np.zeros((int(ys.max()) - y1 + 1, int(xs.max()) - x1 + 1), bool)
+            pixels[ys - y1, xs - x1] = True
+            people.append(_Person(p["track_id"], np.array(p["box"], np.float32), y1, x1, pixels))
+        near = cv2.dilate((inst > 0).astype(np.uint8), margin) > 0
+        out[f["idx"]] = _LabelFrame(f["idx"], people, np.packbits(near))
+    _TRUTH[key] = out
+    return out
+
+
+def score_clip(cfg: Any, clip: Path, stride: int, eval_min_height: float,
+               tracker: dict | None = None) -> tuple[Score, Score]:
+    """Run the pipeline over the clip; scores of its first and second half."""
     labels = load_labels(clip.stem)
     fps, h, w = labels["fps"], labels["height"], labels["width"]
     cache = ModelCache.load_or_build(cfg, clip, stride)
     detector = ReplayDetector(cfg, fps / stride, cache)
+    if tracker:                                   # tracker settings beyond the yaml file
+        from ultralytics.utils import IterableSimpleNamespace
+        args = {**vars(detector.tracker_args), **tracker}
+        detector.tracker_args = IterableSimpleNamespace(**args)
+        detector._tracker_cls = TRACKER_MAP[args["tracker_type"]]
+        detector._predict_conf = min(detector.conf, float(args["track_low_thresh"]))
+        detector.reset()
     renderer = StyleRenderer(cfg)
     renderer.set_default_style("solid")      # the style does not change the cover; solid is cheapest
     renderer.keep_cover = True
-    truth = {f["idx"]: f for f in labels["frames"] if f["label"]}
-    needs_image = str(cfg.detector.tracker).startswith("botsort")   # GMC / ReID look at the image
+    truth = load_truth(clip.stem, eval_min_height)
+    needs_image = detector.tracker_args.tracker_type == "botsort"   # GMC / ReID look at the image
     blank = np.zeros((h, w, 3), np.uint8)
-    margin = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * round(OVER_MARGIN * h) + 1,) * 2)
+    middle = labels["frame_count"] / 2
 
-    s = Score()
-    live_ids: dict[int, list[int | None]] = {}     # teacher track -> live ID per label frame
+    halves = (Score(), Score())
+    live_ids: dict[int, list[tuple[int, int | None]]] = {}     # teacher track -> (idx, live ID) per label frame
     t0 = time.perf_counter()
     cap = cv2.VideoCapture(str(clip)) if needs_image else None
+    pos = 0
     for idx in sorted(cache.rows):
         img = blank
         if cap is not None:
-            while True:     # sequential decode up to idx
-                pos = int(cap.get(cv2.CAP_PROP_POS_FRAMES))
-                if pos == idx:
-                    ok, img = cap.read()
-                    break
-                cap.grab()
+            while pos < idx:
+                cap.grab(); pos += 1
+            ok, img = cap.read(); pos += 1
         frame = Frame(img, idx / fps, idx, clip.stem)
         dets = detector.detect(frame)
         renderer.render(frame, dets, {})
         if idx in truth:
-            _score_frame(s, truth[idx], dets, renderer.last_cover, idx, clip.stem, (h, w), eval_min_height,
-                         margin, live_ids)
+            _score_frame(halves[idx >= middle], truth[idx], dets, renderer.last_cover, clip.stem, (h, w), live_ids)
     if cap is not None:
         cap.release()
-    s.seconds = time.perf_counter() - t0
+    halves[0].seconds = time.perf_counter() - t0
     label_dt = labels["teacher"]["label_every"] / fps
     for seq in live_ids.values():
-        s.track_minutes += len(seq) * label_dt / 60
-        known = [i for i in seq if i is not None]
-        s.id_switches += sum(a != b for a, b in zip(known, known[1:]))
-    return s
+        for half, s in enumerate(halves):
+            part = [live for idx, live in seq if (idx >= middle) == half]
+            s.track_minutes += len(part) * label_dt / 60
+            known = [i for i in part if i is not None]
+            s.id_switches += sum(a != b for a, b in zip(known, known[1:]))
+    return halves
 
 
-def _score_frame(s: Score, truth: dict, dets: Detections, cover: np.ndarray | None, idx: int, clip: str,
-                 shape: tuple[int, int], eval_min_height: float, margin: np.ndarray,
-                 live_ids: dict[int, list[int | None]]) -> None:
-    h, _ = shape
-    inst = cv2.imread(str(LABELS / clip / "masks" / f"{idx:06d}.png"), cv2.IMREAD_UNCHANGED)
+def _score_frame(s: Score, truth: _LabelFrame, dets: Detections, cover: np.ndarray | None, clip: str,
+                 shape: tuple[int, int], live_ids: dict[int, list[tuple[int, int | None]]]) -> None:
     covered = cover >= COVERED if cover is not None else np.zeros(shape, bool)
     s.frames += 1
     frame_missed = False
-    for p in truth["people"]:
-        if p["ignore"] or "id" not in p or p["visible_area"] < MIN_VISIBLE_PX:
-            continue
-        if (p["box"][3] - p["box"][1]) / h < eval_min_height:
-            continue
-        mine = inst == p["id"]
-        visible = int(mine.sum())
-        uncovered = int((mine & ~covered).sum())
+    for p in truth.people:
+        ph, pw = p.pixels.shape
+        visible = int(p.pixels.sum())
+        uncovered = int((p.pixels & ~covered[p.y1:p.y1 + ph, p.x1:p.x1 + pw]).sum())
         leak = uncovered / visible
         s.person_frames += 1
         s.gt_px += visible
@@ -248,14 +306,14 @@ def _score_frame(s: Score, truth: dict, dets: Detections, cover: np.ndarray | No
         if leak > LEAK_MISSED:
             s.missed += 1
             frame_missed = True
-            s.worst.append((round(leak, 2), clip, idx, p["track_id"]))
-        live = _live_id(np.array(p["box"]), dets)
+            s.worst.append((round(leak, 2), clip, truth.idx, p.track_id))
+        live = _live_id(p.box, dets)
         s.with_id += live is not None
-        if p["track_id"] is not None:
-            live_ids.setdefault(p["track_id"], []).append(live)
+        if p.track_id is not None:
+            live_ids.setdefault(p.track_id, []).append((truth.idx, live))
     s.leak_frames += frame_missed
-    near_people = cv2.dilate((inst > 0).astype(np.uint8), margin) > 0
-    s.over_px += float((covered & ~near_people).mean())
+    near = np.unpackbits(truth.near, count=covered.size).reshape(covered.shape).astype(bool)
+    s.over_px += float((covered & ~near).mean())
 
 
 def _live_id(box: np.ndarray, dets: Detections) -> int | None:
@@ -271,15 +329,18 @@ def _live_id(box: np.ndarray, dets: Detections) -> int | None:
     return best
 
 
-def evaluate(cfg: Any, clips: list[Path], stride: int | None = None, eval_min_height: float = 0.12
-             ) -> tuple[Score, dict[str, Score]]:
-    total, per_clip = Score(), {}
+def evaluate(cfg: Any, clips: list[Path], stride: int | None = None, eval_min_height: float = 0.12,
+             tracker: dict | None = None) -> tuple[Score, dict[str, Score]]:
+    """Total and per-part scores; parts are '<clip> 1st half' and '<clip> 2nd half'."""
+    total, parts = Score(), {}
     for clip in clips:
         fps = load_labels(clip.stem)["fps"]
         st = stride or max(1, round(fps / float(cfg.expected_fps)))
-        per_clip[clip.stem] = score_clip(cfg, clip, st, eval_min_height)
-        total.add(per_clip[clip.stem])
-    return total, per_clip
+        first, second = score_clip(cfg, clip, st, eval_min_height, tracker)
+        parts[f"{clip.stem} 1st half"], parts[f"{clip.stem} 2nd half"] = first, second
+        total.add(first)
+        total.add(second)
+    return total, parts
 
 
 def format_table(rows: dict[str, Score]) -> str:
@@ -312,8 +373,8 @@ def main(argv: list[str] | None = None) -> int:
     clips = args.clips or labelled_clips()
     if not clips:
         p.exit(2, "no labelled clips: run python -m eval.teacher first\n")
-    total, per_clip = evaluate(cfg, clips, args.stride, args.eval_min_height)
-    print(format_table({**per_clip, "TOTAL": total}))
+    total, parts = evaluate(cfg, clips, args.stride, args.eval_min_height)
+    print(format_table({**parts, "TOTAL": total}))
     for leak, clip, idx, tid in sorted(total.worst, key=lambda w: (w[0], w[1], w[2]), reverse=True)[:args.worst]:
         print(f"  missed: {clip} frame {idx} (t={idx / load_labels(clip)['fps']:.2f}s) teacher #{tid}, {leak:.0%} uncovered")
     return 0

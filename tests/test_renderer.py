@@ -35,8 +35,7 @@ def make_scene():
 
 def renderer(style="niqab", smooth=False):
     sets = [f"policy.conceal_style={style}"]
-    if not smooth:
-        sets += ["timing.mask_smooth_seconds=0"]
+    sets += [f"timing.mask_smooth_seconds={0.15 if smooth else 0}"]   # the smoothing tests need it on, whatever the config
     return StyleRenderer(load_config("intel", sets))
 
 

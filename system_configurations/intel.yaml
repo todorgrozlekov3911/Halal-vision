@@ -7,7 +7,7 @@ detector:
   device: intel:npu         # NPU: ~15 ms sustained vs ~50-65 ms on intel:gpu, same detections. Needs the NPU driver + render group
   half: false
   int8: false               # true only with intel:gpu (~18% faster there); INT8 on the NPU loses far-away people, so it is refused
-  imgsz: [384, 640]         # [height, width]: 16:9 like the video, no padding (416x416 wasted 40% on bars and missed far people)
+  # imgsz: from shared.yaml ([512, 896]); 384x640 ran 7.5 ms on the NPU but missed 3x more people
 
 identity:
   face_model: buffalo_s     # lighter face stack for the weaker machine

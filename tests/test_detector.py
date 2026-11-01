@@ -126,7 +126,8 @@ def test_people_found_id_less_first_then_tracked(street_frames):
     assert all(t.track_id is None for t in first.tracks)      # new tracks are not trusted yet
     assert sum(t.track_id is not None for t in last.tracks) >= 3   # 0.3 s later they are
 
-    assert last.masks.shape == (len(last.tracks), 96, 160)
+    in_h, in_w = cfg.detector.imgsz                           # masks are 1/4 of the model input
+    assert last.masks.shape == (len(last.tracks), in_h // 4, in_w // 4)
     assert last.masks.dtype == np.uint8                       # soft: 0..255 certainty
     assert len(np.unique(last.masks)) > 2, "masks keep the model's certainty, not just yes/no"
     for t in last.tracks:
