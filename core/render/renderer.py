@@ -1,4 +1,4 @@
-"""Renderer (T11, plus the mask hold of T12): paints the conceal styles where the cover masks say.
+"""Renderer (T11, plus the mask hold and fade-out of T12): paints the conceal styles where the cover masks say.
 
 Styles (policy.conceal_style, or the style on a person's conceal action):
     niqab     a plain dark cover, full body (the eye slit is a later task, T32)
@@ -24,7 +24,11 @@ Memory per tracked person (track ID), all timed on Frame.ts:
              previous mask moved along with the person, so its shape changes gradually
     hold     a covered person the detector misses stays covered for timing.mask_hold_seconds,
              their last mask sliding on at their last speed
-The fade-out when a conceal is lifted (rest of T12) is not here yet.
+    fade     when a covered person's conceal is lifted (a pass decision, or they shrank below the
+             size threshold), their cover fades from opaque to nothing over timing.fade_out_seconds
+             (0 = at once). Concealing is always instant: a conceal decision ends a fade at once.
+             Fading people are painted before the full covers, so a fade never thins anyone
+             else's cover, and they get no outline.
 
 Style images are made once per style for the rectangle around that style's people
 (Ultralytics runs OpenCV single-threaded, so full-frame work is expensive). Pixel blocks
@@ -61,6 +65,7 @@ class _Person:
     small: np.ndarray                # soft mask-space mask
     bbox: np.ndarray                 # frame pixels
     geometry: MaskGeometry
+    alpha: float = 1.0               # < 1: fading out (conceal lifted)
 
 
 @dataclass
@@ -72,6 +77,7 @@ class _Memory:
     geometry: MaskGeometry
     style: str = ""
     covered: bool = False            # drawn last time it was seen (only covered people are held)
+    fade_from: float | None = None   # Frame.ts the conceal was lifted, while the fade-out runs
 
 
 class StyleRenderer(Renderer):
@@ -87,6 +93,7 @@ class StyleRenderer(Renderer):
         self.min_height = float(r.min_person_height)
         self.hold_s = float(t.mask_hold_seconds)
         self.smooth_s = float(t.mask_smooth_seconds)
+        self.fade_s = float(t.get("fade_out_seconds", 0.0))
         # painter(frame image, region) -> styled pixels for that region
         self._painters: dict[str, Callable[[np.ndarray, Region], np.ndarray]] = {
             "niqab": self._niqab, "blur": self._blur, "pixelate": self._pixelate, "solid": self._solid,
@@ -117,10 +124,20 @@ class StyleRenderer(Renderer):
         if self.keep_cover:
             self.last_cover = np.zeros(frame.image.shape[:2], np.uint8)
 
-        for style in {p.style for p in people}:        # one combined cover and one paint per style
+        for p, g in zip(people, grown):                 # fading people first: full covers go on top
+            if p.alpha < 1:
+                cover = self.masks.cover_from_small(g, geometry)
+                if cover is not None:
+                    x1, y1, x2, y2 = cover.region
+                    alpha = (cover.mask.astype(np.float32) * p.alpha).astype(np.uint8)
+                    _paint(out[y1:y2, x1:x2], self._painters[p.style](frame.image, cover.region), alpha)
+                    if self.keep_cover:
+                        np.maximum(self.last_cover[y1:y2, x1:x2], alpha, out=self.last_cover[y1:y2, x1:x2])
+
+        for style in {p.style for p in people if p.alpha >= 1}:   # one combined cover and one paint per style
             union = None
             for p, g in zip(people, grown):
-                if p.style == style:
+                if p.style == style and p.alpha >= 1:
                     union = g.copy() if union is None else np.maximum(union, g, out=union)
             cover = self.masks.cover_from_small(union, geometry)
             if cover is not None:
@@ -131,8 +148,9 @@ class StyleRenderer(Renderer):
         t2 = time.perf_counter()
 
         thickness = self.outline_fraction * frame.image.shape[0]
-        if thickness > 0 and people:
-            far_to_near = [g for _, g in sorted(zip(people, grown), key=lambda pg: float(pg[0].bbox[3]))]
+        solid = [(p, g) for p, g in zip(people, grown) if p.alpha >= 1]
+        if thickness > 0 and solid:
+            far_to_near = [g for _, g in sorted(solid, key=lambda pg: float(pg[0].bbox[3]))]
             _draw_outlines(out, far_to_near, geometry, max(1.0, thickness), self.outline_color)
         t3 = time.perf_counter()
         self.last_timing = {"mask": 1000 * (t1 - t0), "paint": 1000 * (t2 - t1),
@@ -161,15 +179,14 @@ class StyleRenderer(Renderer):
                 self._take_over(key, track, seen, now, geometry)
             seen.add(key)
             m = self._remember(key, track, detections.mask_of(track), geometry, now)
-            if not is_covered(track, decisions):
-                m.covered = False                                # shown (pass)
-                continue
             height = float(track.bbox[3] - track.bbox[1]) / frame_h
             needed = self.min_height * (SIZE_HYSTERESIS if m.covered else 1.0)
-            if height < needed:
-                m.covered = False                                # too far away, for now
+            if not is_covered(track, decisions) or height < needed:   # shown (pass), or too far away for now
+                alpha = self._lift(m, now)
+                if alpha is not None:
+                    people.append(_Person(m.style, m.small, track.bbox, geometry, alpha))
                 continue
-            m.covered, m.style = True, self._style_of(track, decisions)
+            m.covered, m.style, m.fade_from = True, self._style_of(track, decisions), None
             people.append(_Person(m.style, m.small, track.bbox, geometry))
 
         for key, m in list(self._memory.items()):               # not detected this frame
@@ -179,12 +196,27 @@ class StyleRenderer(Renderer):
             if not 0 <= age <= self.hold_s or m.geometry != geometry:
                 del self._memory[key]                            # gone for good: forget
                 continue
-            if not m.covered or (key >= 0 and shows(decisions.get(key))):
-                continue                                         # nothing to hold
+            alpha = 1.0
+            if key >= 0 and shows(decisions.get(key)) or not m.covered:
+                alpha = self._lift(m, now)                       # passed while out of sight, or already fading
+                if alpha is None:
+                    continue                                     # nothing to hold
             moved = m.velocity * age
             people.append(_Person(m.style, _shift(m.small, moved * geometry.scale),
-                                  m.bbox + np.tile(moved, 2), geometry))
+                                  m.bbox + np.tile(moved, 2), geometry, alpha))
         return people
+
+    def _lift(self, m: _Memory, now: float) -> float | None:
+        """This person is no longer to be covered: their fade-out opacity now, or None once gone."""
+        if m.covered:                                            # the conceal is lifted now
+            m.covered, m.fade_from = False, now
+        if m.fade_from is None:
+            return None
+        alpha = 1.0 - (now - m.fade_from) / self.fade_s if self.fade_s > 0 else 0.0
+        if not 0 < alpha <= 1:                                   # done (or time went backwards: no fade)
+            m.fade_from = None
+            return None
+        return alpha
 
     def _missing_overlapping(self, track: Track, seen: set[int], now: float,
                              geometry: MaskGeometry) -> int | None:

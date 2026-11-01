@@ -33,9 +33,10 @@ def make_scene():
     return frame, Detections(frame.idx, frame.ts, tracks, masks, GEO)
 
 
-def renderer(style="niqab", smooth=False):
+def renderer(style="niqab", smooth=False, fade=0.0):
     sets = [f"policy.conceal_style={style}"]
     sets += [f"timing.mask_smooth_seconds={0.15 if smooth else 0}"]   # the smoothing tests need it on, whatever the config
+    sets += [f"timing.fade_out_seconds={fade}"]                       # off unless a test is about the fade
     return StyleRenderer(load_config("intel", sets))
 
 
@@ -231,3 +232,67 @@ def test_a_box_that_only_shrinks_is_not_movement():
     from core.render.renderer import _box_motion
     np.testing.assert_array_equal(_box_motion(np.array([480, 120, 840, 600]), np.array([480, 120, 660, 600])), [0, 0])
     np.testing.assert_array_equal(_box_motion(np.array([480, 120, 840, 600]), np.array([500, 120, 870, 600])), [20, 0])
+
+
+# -- fade-out when a conceal is lifted (T12) ---------------------------------------------
+
+PASSED_7 = {7: Decision(7, PASS, TrackState.PASSED, rule="test", confidence=1.0)}
+
+
+def centre(r, ts, decisions, cols=None):
+    """Pixel in the middle of person 7 (cols 40..61) at time ts."""
+    frame, dets = scene_at(ts, {7: (40, 61)} if cols is None else cols)
+    return r.render(frame, dets, decisions).image[300, 600].astype(int)
+
+
+def test_lifting_a_conceal_fades_out_over_the_configured_time():
+    r = renderer("solid", fade=0.2)
+    run(r, 5, {7: (40, 61)})                                     # covered 0.0 .. 0.4 s
+    solid, background = np.array(r.solid_color), np.array([200, 200, 200])
+    at_lift = centre(r, 0.5, PASSED_7)
+    halfway = centre(r, 0.6, PASSED_7)
+    done = centre(r, 0.7, PASSED_7)
+    np.testing.assert_array_equal(at_lift, solid)                # still fully covered the moment it is lifted
+    assert np.all(np.abs(halfway - (solid + background) / 2) <= 2), "half faded after half the time"
+    np.testing.assert_array_equal(done, background)              # gone after fade_out_seconds
+
+
+def test_concealing_again_is_instant_and_ends_the_fade():
+    r = renderer("solid", fade=0.2)
+    run(r, 5, {7: (40, 61)})
+    centre(r, 0.5, PASSED_7)
+    centre(r, 0.6, PASSED_7)                                     # half faded
+    np.testing.assert_array_equal(centre(r, 0.65, {}), r.solid_color)   # concealed again: fully, at once
+    np.testing.assert_array_equal(centre(r, 0.7, {}), r.solid_color)
+
+
+def test_fade_is_timed_in_seconds_not_frames():
+    seen = []
+    for fps in (15, 30):
+        r = renderer("solid", fade=0.2)
+        last, _ = run(r, fps // 2, {7: (40, 61)}, dt=1 / fps)    # half a second covered
+        lift = last + 1 / fps
+        for k in range(fps):                                     # passed from `lift` on
+            ts = lift + k / fps
+            px = centre(r, ts, PASSED_7)
+            if abs(ts - (lift + 2 / 15)) < 1e-6:                  # 2 frames at 15 fps, 4 at 30
+                seen.append(px)
+    assert len(seen) == 2
+    np.testing.assert_allclose(seen[0], seen[1], atol=1)        # same look 0.13 s into the fade at 15 and 30 fps
+    assert not np.array_equal(seen[0], [200, 200, 200])         # (and it is mid-fade, not gone)
+
+
+def test_a_fading_person_never_thins_a_neighbours_cover():
+    r = renderer("solid", fade=0.2)
+    people = {7: (40, 61), 8: (50, 71)}                          # overlapping in columns 50..60
+    run(r, 5, people)
+    frame, dets = scene_at(0.6, people)
+    r.render(scene_at(0.5, people)[0], scene_at(0.5, people)[1], PASSED_7)
+    out = r.render(frame, dets, PASSED_7).image                  # 7 fading, 8 still concealed
+    np.testing.assert_array_equal(out[300, 55 * 12], r.solid_color)
+
+
+def test_no_fade_when_fade_out_seconds_is_zero():
+    r = renderer("solid", fade=0.0)
+    run(r, 5, {7: (40, 61)})
+    np.testing.assert_array_equal(centre(r, 0.5, PASSED_7), [200, 200, 200])

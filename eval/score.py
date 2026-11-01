@@ -22,10 +22,15 @@ of the frame (people the renderer is meant to cover) and not marked ignore:
               (teacher people of any size, ignore ones included), as a share of the frame
   id_switch   changes of the live track ID along one teacher track (per teacher track-minute)
   id_cover    share of person-frames whose person has a live track ID (rather than ID-less)
+  dup         share of person-frames the pipeline shows as two or more people
+  flicker     dropouts per teacher track-minute: the person is covered, then uncovered for at most
+              FLICKER_MAX_S, then covered again. Checked on every processed frame (not only label
+              frames), with the teacher's boxes (15 per second) interpolated in between
 """
 from __future__ import annotations
 
 import argparse
+import bisect
 import json
 import sys
 import time
@@ -53,6 +58,8 @@ LEAK_PARTIAL = 0.1
 MIN_VISIBLE_PX = 400     # people hidden almost entirely behind others are not scored
 OVER_MARGIN = 0.03       # of the frame height: cover this close to a person is growth, not a false cover
 COVERED = 128            # cover alpha at or above this hides the pixel
+BOX_COVERED = 0.3        # flicker: a teacher person counts as covered when this share of their box is covered
+FLICKER_MAX_S = 0.5      # flicker: an uncovered stretch at most this long between covered ones is a dropout
 
 
 # -- model output cache --------------------------------------------------------------
@@ -164,6 +171,8 @@ class Score:
     over_px: float = 0.0          # sum over frames of the over-covered share of the frame
     with_id: int = 0
     duplicated: int = 0           # person-frames the pipeline shows as two or more people
+    dropouts: int = 0             # short uncovered stretches of a covered person (flicker)
+    flicker_minutes: float = 0.0  # teacher track time the flicker was checked over
     id_switches: int = 0
     track_minutes: float = 0.0
     seconds: float = 0.0          # wall time of the replay
@@ -171,7 +180,8 @@ class Score:
 
     def add(self, other: Score) -> None:
         for k in ("person_frames", "missed", "partial", "gt_px", "leak_px", "frames", "leak_frames",
-                  "over_px", "with_id", "duplicated", "id_switches", "track_minutes", "seconds"):
+                  "over_px", "with_id", "duplicated", "dropouts", "flicker_minutes", "id_switches",
+                  "track_minutes", "seconds"):
             setattr(self, k, getattr(self, k) + getattr(other, k))
         self.worst += other.worst
 
@@ -186,6 +196,7 @@ class Score:
             "id_switch/min": self.id_switches / max(1e-9, self.track_minutes),
             "id_cover_%": 100 * self.with_id / pf,
             "dup_%": 100 * self.duplicated / pf,
+            "flicker/min": self.dropouts / max(1e-9, self.flicker_minutes),
             "person_frames": self.person_frames,
         }
 
@@ -263,6 +274,8 @@ def score_clip(cfg: Any, clip: Path, stride: int, eval_min_height: float,
     middle = labels["frame_count"] / 2
 
     halves = (Score(), Score())
+    boxes_at = teacher_boxes(labels, eval_min_height)
+    coverage: dict[int, list[tuple[int, bool]]] = {}           # teacher track -> (idx, covered) per processed frame
     live_ids: dict[int, list[tuple[int, int | None]]] = {}     # teacher track -> (idx, live ID) per label frame
     t0 = time.perf_counter()
     cap = cv2.VideoCapture(str(clip)) if needs_image else None
@@ -276,11 +289,18 @@ def score_clip(cfg: Any, clip: Path, stride: int, eval_min_height: float,
         frame = Frame(img, idx / fps, idx, clip.stem)
         dets = detector.detect(frame)
         renderer.render(frame, dets, {})
+        for tid, box in boxes_at(idx):
+            coverage.setdefault(tid, []).append((idx, _box_covered(renderer.last_cover, box)))
         if idx in truth:
             _score_frame(halves[idx >= middle], truth[idx], dets, renderer.last_cover, clip.stem, (h, w), live_ids)
     if cap is not None:
         cap.release()
     halves[0].seconds = time.perf_counter() - t0
+    for seq in coverage.values():
+        for half, s in enumerate(halves):
+            part = [(idx, c) for idx, c in seq if (idx >= middle) == half]
+            s.flicker_minutes += len(part) * stride / fps / 60
+            s.dropouts += _dropouts(part, fps)
     label_dt = labels["teacher"]["label_every"] / fps
     for seq in live_ids.values():
         for half, s in enumerate(halves):
@@ -317,6 +337,61 @@ def _score_frame(s: Score, truth: _LabelFrame, dets: Detections, cover: np.ndarr
     s.duplicated += _duplicated(truth.people, dets)
     near = np.unpackbits(truth.near, count=covered.size).reshape(covered.shape).astype(bool)
     s.over_px += float((covered & ~near).mean())
+
+
+def teacher_boxes(labels: dict, eval_min_height: float):
+    """idx -> [(teacher track, box)] for scored teacher people on any frame, their boxes interpolated
+    between the teacher's tracked frames (every track_every-th frame)."""
+    h = labels["height"]
+    tracks: dict[int, list[tuple[int, np.ndarray]]] = {}
+    for f in labels["frames"]:
+        for p in f["people"]:
+            if p["track_id"] is None or p["ignore"] or (p["box"][3] - p["box"][1]) / h < eval_min_height:
+                continue
+            tracks.setdefault(p["track_id"], []).append((f["idx"], np.array(p["box"], np.float32)))
+    step = labels["teacher"]["track_every"]
+
+    def at(idx: int) -> list[tuple[int, np.ndarray]]:
+        out = []
+        for tid, seq in tracks.items():
+            if not seq[0][0] <= idx <= seq[-1][0]:
+                continue
+            k = bisect.bisect_left([i for i, _ in seq], idx)
+            i1, b1 = seq[k]
+            if i1 == idx:
+                out.append((tid, b1))
+            elif k > 0 and i1 - seq[k - 1][0] <= step:            # neighbours one teacher step apart
+                i0, b0 = seq[k - 1]
+                w = (idx - i0) / (i1 - i0)
+                out.append((tid, b0 * (1 - w) + b1 * w))
+        return out
+    return at
+
+
+def _box_covered(cover: np.ndarray | None, box: np.ndarray) -> bool:
+    if cover is None:
+        return False
+    h, w = cover.shape
+    x1, y1 = max(0, int(box[0])), max(0, int(box[1]))
+    x2, y2 = min(w, int(box[2]) + 1), min(h, int(box[3]) + 1)
+    if x2 <= x1 or y2 <= y1:
+        return False
+    return float((cover[y1:y2, x1:x2] >= COVERED).mean()) >= BOX_COVERED
+
+
+def _dropouts(seq: list[tuple[int, bool]], fps: float) -> int:
+    """Uncovered stretches of at most FLICKER_MAX_S with covered frames on both sides."""
+    n, k = 0, 0
+    while k < len(seq):
+        if seq[k][1]:
+            k += 1
+            continue
+        start = k
+        while k < len(seq) and not seq[k][1]:
+            k += 1
+        if start > 0 and k < len(seq) and (seq[k][0] - seq[start - 1][0]) / fps <= FLICKER_MAX_S + 1e-9:
+            n += 1
+    return n
 
 
 def _duplicated(people: list[_Person], dets: Detections) -> int:
